@@ -18,7 +18,7 @@ VENUES = {
     "The Windmill Brixton": {"address": "22 Blenheim Gardens", "postcode": "SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
 }
 
-# --- 2. IMPROVED DATE NORMALIZER ---
+# --- 2. DATE NORMALIZER ---
 def normalize_pdf_date(date_str):
     try:
         clean = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|st|nd|rd|th)', '', date_str, flags=re.IGNORECASE).strip()
@@ -28,14 +28,11 @@ def normalize_pdf_date(date_str):
         }
         parts = clean.split()
         if len(parts) >= 3:
-            d = parts[0].zfill(2)
-            m = months.get(parts[1], '01')
-            y = parts[2]
-            return f"{d}.{m}.{y}"
+            return f"{parts[0].zfill(2)}.{months.get(parts[1], '01')}.{parts[2]}"
     except: return None
     return None
 
-# --- 3. IMPROVED CONTRACT PARSING ---
+# --- 3. CONTRACT PARSING LOGIC ---
 def extract_contract_data(zip_file):
     contract_db = {}
     with zipfile.ZipFile(zip_file) as z:
@@ -45,30 +42,23 @@ def extract_contract_data(zip_file):
                     pdf_stream = BytesIO(f.read())
                     try:
                         reader = PdfReader(pdf_stream)
-                        # Extract text with layout to preserve some structure
-                        text = ""
-                        for page in reader.pages:
-                            text += page.extract_text() + " "
+                        text = " ".join([page.extract_text() for page in reader.pages]).replace('\n', ' ')
                         
-                        # Replace newlines with spaces to make regex easier across line breaks
-                        text = text.replace('\n', ' ')
-                        
-                        # Use lookaheads to stop at the next logical field in the TKO contract
+                        # Updated Regex to find Name and Email
                         date_re = r"Performance Date\(s\):\s*(.*?)(?=\s*(?:Group /|Today’s|Times|Ticketing|$))"
                         name_re = r"Contact Name:\s*(.*?)(?=\s*(?:Contact Email|Performance|Today’s|$))"
+                        email_re = r"Contact Email:\s*(.*?)(?=\s*(?:Performance|Group /|Today’s|$))"
                         
                         date_match = re.search(date_re, text, re.IGNORECASE)
                         name_match = re.search(name_re, text, re.IGNORECASE)
+                        email_match = re.search(email_re, text, re.IGNORECASE)
                         
                         if date_match and name_match:
-                            raw_date = date_match.group(1).strip()
-                            contact_name = name_match.group(1).strip()
-                            
-                            normalized = normalize_pdf_date(raw_date)
+                            normalized = normalize_pdf_date(date_match.group(1).strip())
                             if normalized:
                                 contract_db[normalized] = {
-                                    "P_NAME": contact_name,
-                                    "P_ADDR": "Tokyo Industries / TKO Live",
+                                    "P_NAME": name_match.group(1).strip(),
+                                    "P_EMAIL": email_match.group(1).strip() if email_match else "",
                                     "P_TEL": "See Contract"
                                 }
                     except: continue
@@ -101,10 +91,12 @@ if page == "Generate PRS Forms":
                     songs = get_deezer_data(row['Artist'])
                     v_info = VENUES.get(row['Venue'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
                     dur = f"{sum(s['seconds'] for s in songs) // 60}m {sum(s['seconds'] for s in songs) % 60:02d}s"
+                    
                     context = {
                         'V_NAME': row['Venue'], 'V_ADDR': v_info['address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
-                        'DATE': row['Date'], 'ARTIST': row['Artist'], 'P_NAME': row['Promoter Name'], 
-                        'P_ADDR': row['Promoter Address'], 'P_TEL': row['Promoter Tel'], 'POSITION': v_info['position'], 'TOTAL_DURATION': dur
+                        'DATE': row['Date'], 'ARTIST': row['Artist'], 
+                        'P_NAME': row['Promoter Name'], 'P_EMAIL': row['Promoter Email'], 'P_TEL': row['Promoter Tel'],
+                        'POSITION': v_info['position'], 'TOTAL_DURATION': dur
                     }
                     doc = DocxTemplate(TEMPLATE_PATH); doc.render(context)
                     table = doc.tables[-1]
@@ -122,26 +114,21 @@ elif page == "Convert Venue Export":
     with col2: contract_zip = st.file_uploader("2. Upload ZIP of Hire Contracts", type="zip")
 
     if raw_upload:
-        # Move back to start of file after streamlit read
         raw_upload.seek(0)
         temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
-        
-        # Look for the row that contains "The Social" in the first column
         try:
             header_idx = temp_df[temp_df[0] == "The Social"].index[0]
-            raw_upload.seek(0) # Reset again before full read
+            raw_upload.seek(0)
             raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
-            
             cleaned_df = raw_df[[0, 3, 5]].copy()
             cleaned_df.columns = ['Venue', 'Artist', 'Date']
-            
-            # Filter out junk and collapse duplicates
             cleaned_df = cleaned_df[cleaned_df['Artist'].notna()]
             cleaned_df = cleaned_df[cleaned_df['Artist'].str.len() > 2]
             cleaned_df = cleaned_df[~cleaned_df['Artist'].str.contains("Admissions|categories|Licensee|Details|name|Event /", na=False)]
             cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
             
-            for col in ['Promoter Name', 'Promoter Address', 'Promoter Tel']: cleaned_df[col] = ""
+            # Use Email instead of Address
+            for col in ['Promoter Name', 'Promoter Email', 'Promoter Tel']: cleaned_df[col] = ""
 
             if contract_zip:
                 contracts = extract_contract_data(contract_zip)
@@ -150,12 +137,11 @@ elif page == "Convert Venue Export":
                     if csv_date in contracts:
                         info = contracts[csv_date]
                         cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
-                        cleaned_df.at[idx, 'Promoter Address'] = info['P_ADDR']
+                        cleaned_df.at[idx, 'Promoter Email'] = info['P_EMAIL']
                         cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
 
             st.success(f"Processed {len(cleaned_df)} unique shows.")
             edited_df = st.data_editor(cleaned_df, num_rows="dynamic", use_container_width=True)
             csv_buffer = edited_df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Download Formatted CSV", csv_buffer, "formatted_shows.csv", "text/csv")
-        except Exception as e:
-            st.error(f"Could not find the start of the data. Please ensure you are using the standard Venue Export CSV. Error: {e}")
+        except: st.error("Error identifying data start in CSV.")
