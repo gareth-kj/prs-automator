@@ -6,7 +6,7 @@ import os
 import re
 from docxtpl import DocxTemplate
 from io import BytesIO
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 
 # --- 1. CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,32 +20,38 @@ VENUES = {
 
 # --- 2. CONTRACT PARSING LOGIC ---
 def extract_contract_data(zip_file):
-    """Scans a ZIP of PDFs and returns a dictionary keyed by date."""
     contract_db = {}
     with zipfile.ZipFile(zip_file) as z:
         for filename in z.namelist():
-            if filename.endswith(".pdf"):
+            # Skip hidden mac files or non-pdfs
+            if filename.endswith(".pdf") and not filename.startswith("__MACOSX"):
                 with z.open(filename) as f:
-                    reader = PdfReader(f)
-                    text = "".join([page.extract_text() for page in reader.pages])
-                    
-                    # Regex to find Date (e.g., Monday 29th June 2026)
-                    date_match = re.search(r"Performance Date\(s\):\s*(.*)", text)
-                    name_match = re.search(r"Contact Name:\s*(.*)", text)
-                    
-                    if date_match:
-                        # Clean the date to match CSV format (simple string match)
-                        raw_date = date_match.group(1).strip()
-                        # Extract basic name
-                        name = name_match.group(1).strip() if name_match else "Unknown"
+                    # Wrap in BytesIO to fix the EOF error
+                    pdf_stream = BytesIO(f.read())
+                    try:
+                        reader = PdfReader(pdf_stream)
+                        text = "".join([page.extract_text() for page in reader.pages])
                         
-                        # Store extracted info
-                        contract_db[raw_date] = {
-                            "P_NAME": name,
-                            "P_ADDR": "Tokyo Industries / TKO Live", # Defaulting based on your form
-                            "P_POST": "SE1 1RU",
-                            "P_TEL": "See Contract"
-                        }
+                        # Extract Data using Regex
+                        date_match = re.search(r"Performance Date\(s\):\s*(.*)", text)
+                        name_match = re.search(r"Contact Name:\s*(.*)", text)
+                        
+                        if date_match:
+                            raw_date_str = date_match.group(1).strip()
+                            name = name_match.group(1).strip() if name_match else "Unknown"
+                            
+                            # Standardize the date for matching (e.g. "29th June 2026")
+                            # We strip the Day name (Monday) to make matching easier
+                            clean_date = re.sub(r'^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*', '', raw_date_str)
+                            
+                            contract_db[clean_date] = {
+                                "P_NAME": name,
+                                "P_ADDR": "Tokyo Industries / TKO Live",
+                                "P_POST": "SE1 1RU",
+                                "P_TEL": "See Contract"
+                            }
+                    except Exception as e:
+                        st.warning(f"Could not read {filename}: {e}")
     return contract_db
 
 # --- 3. HELPER FUNCTIONS ---
@@ -94,35 +100,35 @@ if page == "Generate PRS Forms":
 
 elif page == "Convert Venue Export":
     st.title("📂 Venue Export & Contract Matcher")
-    st.markdown("Upload the Venue CSV **AND** the ZIP of Hire Contracts to auto-populate promoter details.")
-
     col1, col2 = st.columns(2)
     with col1:
         raw_upload = st.file_uploader("1. Upload Raw Venue CSV", type="csv")
     with col2:
-        contract_zip = st.file_uploader("2. Upload ZIP of Hire Contracts (PDFs)", type="zip")
+        contract_zip = st.file_uploader("2. Upload ZIP of Hire Contracts", type="zip")
 
     if raw_upload:
+        # Load raw data (Review Form.csv)
         raw_df = pd.read_csv(raw_upload, skiprows=14, header=None)
         cleaned_df = raw_df[[0, 3, 5]].copy()
         cleaned_df.columns = ['Venue', 'Artist', 'Date']
         cleaned_df = cleaned_df.dropna(subset=['Artist']).drop_duplicates(subset=['Artist', 'Date'])
         
-        # Initialize empty columns
         for col in ['Promoter Name', 'Promoter Address', 'Promoter Postcode', 'Promoter Tel']:
             cleaned_df[col] = ""
 
-        # MATCHING LOGIC
         if contract_zip:
-            st.info("Reading contracts and matching dates...")
             contracts = extract_contract_data(contract_zip)
             
             for idx, row in cleaned_df.iterrows():
-                # We try to match the date string in the CSV to the one in the PDF
-                # Note: This requires the CSV date and PDF date to be written similarly 
-                # e.g., '18.03.2026' vs 'Monday 29th June 2026' - might need normalization
+                csv_date = str(row['Date']) # e.g. 29.06.2026
+                
+                # Attempt to match. Since CSV is DD.MM.YYYY and PDF is "29th June 2026",
+                # a simple substring match might fail. We check if day and year match.
+                day = csv_date.split('.')[0]
+                year = csv_date.split('.')[-1]
+                
                 for contract_date, info in contracts.items():
-                    if row['Date'] in contract_date or contract_date in row['Date']:
+                    if day in contract_date and year in contract_date:
                         cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
                         cleaned_df.at[idx, 'Promoter Address'] = info['P_ADDR']
                         cleaned_df.at[idx, 'Promoter Postcode'] = info['P_POST']
@@ -130,6 +136,5 @@ elif page == "Convert Venue Export":
 
         st.success(f"Processed {len(cleaned_df)} shows.")
         edited_df = st.data_editor(cleaned_df, num_rows="dynamic", use_container_width=True)
-        
         csv_buffer = edited_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Formatted CSV", csv_buffer, "formatted_shows.csv", "text/csv")
