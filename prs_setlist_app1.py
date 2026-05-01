@@ -18,18 +18,37 @@ VENUES = {
     "The Windmill Brixton": {"address": "22 Blenheim Gardens", "postcode": "SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
 }
 
-# --- 2. DATE NORMALIZER ---
+# --- 2. ROBUST DATE NORMALIZER ---
 def normalize_pdf_date(date_str):
+    """Converts 'Saturday 23rd August 2025' to '23.08.2025'."""
     try:
+        # 1. Clean string: remove day names and ordinals (st, nd, rd, th)
         clean = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|st|nd|rd|th)', '', date_str, flags=re.IGNORECASE).strip()
-        months = {
-            'January': '01', 'February': '02', 'March': '03', 'April': '04', 'May': '05', 'June': '06',
-            'July': '07', 'August': '08', 'September': '09', 'October': '10', 'November': '11', 'December': '12'
+        
+        months_map = {
+            'january': '01', 'february': '02', 'march': '03', 'april': '04', 'may': '05', 'june': '06',
+            'july': '07', 'august': '08', 'september': '09', 'october': '10', 'november': '11', 'december': '12',
+            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'jun': '06', 'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
         }
+        
+        # 2. Extract digits for day/year and words for month
         parts = clean.split()
-        if len(parts) >= 3:
-            return f"{parts[0].zfill(2)}.{months.get(parts[1], '01')}.{parts[2]}"
-    except: return None
+        day = ""
+        month = ""
+        year = ""
+        
+        for p in parts:
+            p_lower = p.lower().strip()
+            if p_lower in months_map:
+                month = months_map[p_lower]
+            elif p.isdigit():
+                if len(p) <= 2: day = p.zfill(2)
+                if len(p) == 4: year = p
+        
+        if day and month and year:
+            return f"{day}.{month}.{year}"
+    except:
+        return None
     return None
 
 # --- 3. CONTRACT PARSING LOGIC ---
@@ -44,20 +63,21 @@ def extract_contract_data(zip_file):
                         reader = PdfReader(pdf_stream)
                         text = " ".join([page.extract_text() for page in reader.pages]).replace('\n', ' ')
                         
-                        # Updated Regex to find Name and Email
-                        date_re = r"Performance Date\(s\):\s*(.*?)(?=\s*(?:Group /|Today’s|Times|Ticketing|$))"
-                        name_re = r"Contact Name:\s*(.*?)(?=\s*(?:Contact Email|Performance|Today’s|$))"
-                        email_re = r"Contact Email:\s*(.*?)(?=\s*(?:Performance|Group /|Today’s|$))"
+                        # Flexible Regex: Stops at any common next field header
+                        stop_at = r"(?=\s*(?:Group /|Today’s|Times|Ticketing|Venue|Contact|$))"
+                        date_re = r"Performance Date\(s\):\s*(.*?)" + stop_at
+                        name_re = r"Contact Name:\s*(.*?)" + stop_at
+                        email_re = r"Contact Email:\s*(.*?)" + stop_at
                         
                         date_match = re.search(date_re, text, re.IGNORECASE)
                         name_match = re.search(name_re, text, re.IGNORECASE)
                         email_match = re.search(email_re, text, re.IGNORECASE)
                         
-                        if date_match and name_match:
-                            normalized = normalize_pdf_date(date_match.group(1).strip())
-                            if normalized:
-                                contract_db[normalized] = {
-                                    "P_NAME": name_match.group(1).strip(),
+                        if date_match:
+                            norm_date = normalize_pdf_date(date_match.group(1).strip())
+                            if norm_date:
+                                contract_db[norm_date] = {
+                                    "P_NAME": name_match.group(1).strip() if name_match else "Unknown",
                                     "P_EMAIL": email_match.group(1).strip() if email_match else "",
                                     "P_TEL": "See Contract"
                                 }
@@ -117,9 +137,11 @@ elif page == "Convert Venue Export":
         raw_upload.seek(0)
         temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
         try:
-            header_idx = temp_df[temp_df[0] == "The Social"].index[0]
+            # Find the start row by looking for the "The Social" cell
+            header_idx = temp_df[temp_df.eq("The Social").any(axis=1)].index[0]
             raw_upload.seek(0)
             raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
+            
             cleaned_df = raw_df[[0, 3, 5]].copy()
             cleaned_df.columns = ['Venue', 'Artist', 'Date']
             cleaned_df = cleaned_df[cleaned_df['Artist'].notna()]
@@ -127,7 +149,6 @@ elif page == "Convert Venue Export":
             cleaned_df = cleaned_df[~cleaned_df['Artist'].str.contains("Admissions|categories|Licensee|Details|name|Event /", na=False)]
             cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
             
-            # Use Email instead of Address
             for col in ['Promoter Name', 'Promoter Email', 'Promoter Tel']: cleaned_df[col] = ""
 
             if contract_zip:
