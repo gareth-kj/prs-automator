@@ -18,43 +18,51 @@ VENUES = {
     "The Windmill Brixton": {"address": "22 Blenheim Gardens", "postcode": "SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
 }
 
-# --- 2. CONTRACT PARSING LOGIC ---
+# --- 2. DATE NORMALIZER ---
+def normalize_pdf_date(date_str):
+    """Converts 'Monday 29th June 2026' to '29.06.2026' for exact matching."""
+    try:
+        clean = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|st|nd|rd|th)', '', date_str).strip()
+        months = {
+            'January': '01', 'February': '02', 'March': '03', 'April': '04', 'May': '05', 'June': '06',
+            'July': '07', 'August': '08', 'September': '09', 'October': '10', 'November': '11', 'December': '12'
+        }
+        parts = clean.split()
+        if len(parts) == 3:
+            return f"{parts[0].zfill(2)}.{months.get(parts[1], '01')}.{parts[2]}"
+    except: return None
+    return None
+
+# --- 3. CONTRACT PARSING LOGIC ---
 def extract_contract_data(zip_file):
     contract_db = {}
     with zipfile.ZipFile(zip_file) as z:
         for filename in z.namelist():
-            # Skip hidden mac files or non-pdfs
             if filename.endswith(".pdf") and not filename.startswith("__MACOSX"):
                 with z.open(filename) as f:
-                    # Wrap in BytesIO to fix the EOF error
                     pdf_stream = BytesIO(f.read())
                     try:
                         reader = PdfReader(pdf_stream)
                         text = "".join([page.extract_text() for page in reader.pages])
                         
-                        # Extract Data using Regex
                         date_match = re.search(r"Performance Date\(s\):\s*(.*)", text)
                         name_match = re.search(r"Contact Name:\s*(.*)", text)
                         
-                        if date_match:
-                            raw_date_str = date_match.group(1).strip()
-                            name = name_match.group(1).strip() if name_match else "Unknown"
+                        if date_match and name_match:
+                            raw_date = date_match.group(1).strip().split('\n')[0]
+                            contact_name = name_match.group(1).strip().split('\n')[0]
                             
-                            # Standardize the date for matching (e.g. "29th June 2026")
-                            # We strip the Day name (Monday) to make matching easier
-                            clean_date = re.sub(r'^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*', '', raw_date_str)
-                            
-                            contract_db[clean_date] = {
-                                "P_NAME": name,
-                                "P_ADDR": "Tokyo Industries / TKO Live",
-                                "P_POST": "SE1 1RU",
-                                "P_TEL": "See Contract"
-                            }
-                    except Exception as e:
-                        st.warning(f"Could not read {filename}: {e}")
+                            normalized = normalize_pdf_date(raw_date)
+                            if normalized:
+                                contract_db[normalized] = {
+                                    "P_NAME": contact_name,
+                                    "P_ADDR": "Tokyo Industries / TKO Live",
+                                    "P_TEL": "See Contract"
+                                }
+                    except: continue
     return contract_db
 
-# --- 3. HELPER FUNCTIONS ---
+# --- 4. HELPER FUNCTIONS ---
 def get_deezer_data(artist_name):
     try:
         search = requests.get(f"https://api.deezer.com/search/artist?q={artist_name}").json()
@@ -68,7 +76,7 @@ def get_deezer_data(artist_name):
 def format_seconds(total_seconds):
     return f"{total_seconds // 60}m {total_seconds % 60:02d}s"
 
-# --- 4. UI ---
+# --- 5. UI ---
 st.set_page_config(page_title="PRS Toolkit Pro", page_icon="🎸", layout="wide")
 page = st.sidebar.selectbox("Select Tool", ["Generate PRS Forms", "Convert Venue Export"])
 
@@ -83,19 +91,21 @@ if page == "Generate PRS Forms":
                 for _, row in df.iterrows():
                     songs = get_deezer_data(row['Artist'])
                     v_info = VENUES.get(row['Venue'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
+                    
                     context = {
                         'V_NAME': row['Venue'], 'V_ADDR': v_info['address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
-                        'DATE': row['Date'], 'ARTIST': row['Artist'], 'P_NAME': row['Promoter Name'],
-                        'P_ADDR': row['Promoter Address'], 'P_POST': row['Promoter Postcode'], 'P_TEL': row['Promoter Tel'],
+                        'DATE': row['Date'], 'ARTIST': row['Artist'], 
+                        'P_NAME': row['Promoter Name'], 'P_ADDR': row['Promoter Address'], 'P_TEL': row['Promoter Tel'],
                         'POSITION': v_info['position'], 'TOTAL_DURATION': format_seconds(sum(s['seconds'] for s in songs))
                     }
+                    
                     doc = DocxTemplate(TEMPLATE_PATH); doc.render(context)
                     table = doc.tables[-1]
                     for i, s in enumerate(songs):
                         table.cell(i+1, 1).text = s['title'].upper()
                         table.cell(i+1, 4).text = s['duration']
                     doc_io = BytesIO(); doc.save(doc_io)
-                    zip_file.writestr(f"PRS_{row['Artist']}.docx", doc_io.getvalue())
+                    zip_file.writestr(f"PRS_{row['Artist'].replace(' ', '_')}.docx", doc_io.getvalue())
             st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "PRS_Batch.zip")
 
 elif page == "Convert Venue Export":
@@ -107,34 +117,29 @@ elif page == "Convert Venue Export":
         contract_zip = st.file_uploader("2. Upload ZIP of Hire Contracts", type="zip")
 
     if raw_upload:
-        # Load raw data (Review Form.csv)
         raw_df = pd.read_csv(raw_upload, skiprows=14, header=None)
         cleaned_df = raw_df[[0, 3, 5]].copy()
         cleaned_df.columns = ['Venue', 'Artist', 'Date']
         cleaned_df = cleaned_df.dropna(subset=['Artist']).drop_duplicates(subset=['Artist', 'Date'])
         
-        for col in ['Promoter Name', 'Promoter Address', 'Promoter Postcode', 'Promoter Tel']:
+        # Initialize empty columns (No Postcode)
+        for col in ['Promoter Name', 'Promoter Address', 'Promoter Tel']:
             cleaned_df[col] = ""
 
         if contract_zip:
             contracts = extract_contract_data(contract_zip)
-            
             for idx, row in cleaned_df.iterrows():
-                csv_date = str(row['Date']) # e.g. 29.06.2026
-                
-                # Attempt to match. Since CSV is DD.MM.YYYY and PDF is "29th June 2026",
-                # a simple substring match might fail. We check if day and year match.
-                day = csv_date.split('.')[0]
-                year = csv_date.split('.')[-1]
-                
-                for contract_date, info in contracts.items():
-                    if day in contract_date and year in contract_date:
-                        cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
-                        cleaned_df.at[idx, 'Promoter Address'] = info['P_ADDR']
-                        cleaned_df.at[idx, 'Promoter Postcode'] = info['P_POST']
-                        cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
+                csv_date = str(row['Date']).strip()
+                if csv_date in contracts:
+                    info = contracts[csv_date]
+                    cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
+                    cleaned_df.at[idx, 'Promoter Address'] = info['P_ADDR']
+                    cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
 
         st.success(f"Processed {len(cleaned_df)} shows.")
-        edited_df = st.data_editor(cleaned_df, num_rows="dynamic", use_container_width=True)
+        # Reorder columns for final CSV
+        final_cols = ['Artist', 'Date', 'Venue', 'Promoter Name', 'Promoter Address', 'Promoter Tel']
+        edited_df = st.data_editor(cleaned_df[final_cols], num_rows="dynamic", use_container_width=True)
+        
         csv_buffer = edited_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Formatted CSV", csv_buffer, "formatted_shows.csv", "text/csv")
