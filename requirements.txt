@@ -2,4 +2,4 @@ streamlit
 pandas
 requests
 docxtpl
-PyPDF2
+pypdf
