@@ -122,4 +122,40 @@ elif page == "Convert Venue Export":
     with col2: contract_zip = st.file_uploader("2. Upload ZIP of Hire Contracts", type="zip")
 
     if raw_upload:
-        # Move back to start of file after
+        # Move back to start of file after streamlit read
+        raw_upload.seek(0)
+        temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
+        
+        # Look for the row that contains "The Social" in the first column
+        try:
+            header_idx = temp_df[temp_df[0] == "The Social"].index[0]
+            raw_upload.seek(0) # Reset again before full read
+            raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
+            
+            cleaned_df = raw_df[[0, 3, 5]].copy()
+            cleaned_df.columns = ['Venue', 'Artist', 'Date']
+            
+            # Filter out junk and collapse duplicates
+            cleaned_df = cleaned_df[cleaned_df['Artist'].notna()]
+            cleaned_df = cleaned_df[cleaned_df['Artist'].str.len() > 2]
+            cleaned_df = cleaned_df[~cleaned_df['Artist'].str.contains("Admissions|categories|Licensee|Details|name|Event /", na=False)]
+            cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
+            
+            for col in ['Promoter Name', 'Promoter Address', 'Promoter Tel']: cleaned_df[col] = ""
+
+            if contract_zip:
+                contracts = extract_contract_data(contract_zip)
+                for idx, row in cleaned_df.iterrows():
+                    csv_date = str(row['Date']).strip()
+                    if csv_date in contracts:
+                        info = contracts[csv_date]
+                        cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
+                        cleaned_df.at[idx, 'Promoter Address'] = info['P_ADDR']
+                        cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
+
+            st.success(f"Processed {len(cleaned_df)} unique shows.")
+            edited_df = st.data_editor(cleaned_df, num_rows="dynamic", use_container_width=True)
+            csv_buffer = edited_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Formatted CSV", csv_buffer, "formatted_shows.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Could not find the start of the data. Please ensure you are using the standard Venue Export CSV. Error: {e}")
