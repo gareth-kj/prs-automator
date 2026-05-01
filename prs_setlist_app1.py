@@ -20,18 +20,17 @@ VENUES = {
 
 # --- 2. IMPROVED DATE NORMALIZER ---
 def normalize_pdf_date(date_str):
-    """Converts 'Monday 29th June 2026' to '29.06.2026'."""
     try:
-        # Remove day names and ordinals (st, nd, rd, th)
         clean = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|st|nd|rd|th)', '', date_str, flags=re.IGNORECASE).strip()
         months = {
             'January': '01', 'February': '02', 'March': '03', 'April': '04', 'May': '05', 'June': '06',
             'July': '07', 'August': '08', 'September': '09', 'October': '10', 'November': '11', 'December': '12'
         }
-        # Split and take the first 3 parts only
         parts = clean.split()
         if len(parts) >= 3:
-            d, m, y = parts[0].zfill(2), months.get(parts[1], '01'), parts[2]
+            d = parts[0].zfill(2)
+            m = months.get(parts[1], '01')
+            y = parts[2]
             return f"{d}.{m}.{y}"
     except: return None
     return None
@@ -46,11 +45,17 @@ def extract_contract_data(zip_file):
                     pdf_stream = BytesIO(f.read())
                     try:
                         reader = PdfReader(pdf_stream)
-                        text = " ".join([page.extract_text() for page in reader.pages])
+                        # Extract text with layout to preserve some structure
+                        text = ""
+                        for page in reader.pages:
+                            text += page.extract_text() + " "
                         
-                        # Use non-greedy regex with lookaheads to stop at the next field
-                        date_re = r"Performance Date\(s\):\s*(.*?)(?=\s*(?:Contact Email|Group /|Today’s|Times|$))"
-                        name_re = r"Contact Name:\s*(.*?)(?=\s*(?:Contact Email|Performance|Today’s|Times|$))"
+                        # Replace newlines with spaces to make regex easier across line breaks
+                        text = text.replace('\n', ' ')
+                        
+                        # Use lookaheads to stop at the next logical field in the TKO contract
+                        date_re = r"Performance Date\(s\):\s*(.*?)(?=\s*(?:Group /|Today’s|Times|Ticketing|$))"
+                        name_re = r"Contact Name:\s*(.*?)(?=\s*(?:Contact Email|Performance|Today’s|$))"
                         
                         date_match = re.search(date_re, text, re.IGNORECASE)
                         name_match = re.search(name_re, text, re.IGNORECASE)
@@ -69,7 +74,7 @@ def extract_contract_data(zip_file):
                     except: continue
     return contract_db
 
-# --- 4. DATA FETCHING ---
+# --- 4. HELPERS ---
 def get_deezer_data(artist_name):
     try:
         search = requests.get(f"https://api.deezer.com/search/artist?q={artist_name}").json()
@@ -96,7 +101,6 @@ if page == "Generate PRS Forms":
                     songs = get_deezer_data(row['Artist'])
                     v_info = VENUES.get(row['Venue'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
                     dur = f"{sum(s['seconds'] for s in songs) // 60}m {sum(s['seconds'] for s in songs) % 60:02d}s"
-                    
                     context = {
                         'V_NAME': row['Venue'], 'V_ADDR': v_info['address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
                         'DATE': row['Date'], 'ARTIST': row['Artist'], 'P_NAME': row['Promoter Name'], 
@@ -118,31 +122,4 @@ elif page == "Convert Venue Export":
     with col2: contract_zip = st.file_uploader("2. Upload ZIP of Hire Contracts", type="zip")
 
     if raw_upload:
-        # Robust CSV Loading: Find the header row dynamically
-        temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
-        header_idx = temp_df[temp_df.eq("The Social").any(axis=1)].index[0]
-        raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
-        
-        cleaned_df = raw_df[[0, 3, 5]].copy()
-        cleaned_df.columns = ['Venue', 'Artist', 'Date']
-        cleaned_df = cleaned_df[cleaned_df['Artist'].notna()]
-        # Remove the 'Gross receipts' and instruction rows if they were caught
-        cleaned_df = cleaned_df[~cleaned_df['Artist'].str.contains("Admissions|categories|Licensee|Details|name", na=False)]
-        cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
-        
-        for col in ['Promoter Name', 'Promoter Address', 'Promoter Tel']: cleaned_df[col] = ""
-
-        if contract_zip:
-            contracts = extract_contract_data(contract_zip)
-            for idx, row in cleaned_df.iterrows():
-                csv_date = str(row['Date']).strip()
-                if csv_date in contracts:
-                    info = contracts[csv_date]
-                    cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
-                    cleaned_df.at[idx, 'Promoter Address'] = info['P_ADDR']
-                    cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
-
-        st.success(f"Processed {len(cleaned_df)} shows.")
-        edited_df = st.data_editor(cleaned_df, num_rows="dynamic", use_container_width=True)
-        csv_buffer = edited_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Formatted CSV", csv_buffer, "formatted_shows.csv", "text/csv")
+        # Move back to start of file after
