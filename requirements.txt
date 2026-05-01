@@ -1,5 +1,8 @@
 streamlit
 pandas
 requests
+zipfile36
 docxtpl
 pypdf
+selenium
+webdriver-manager
