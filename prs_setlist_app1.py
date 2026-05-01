@@ -13,48 +13,46 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_FILENAME = "PRS SETLIST TEMPLATE.docx"
 TEMPLATE_PATH = os.path.join(BASE_DIR, TEMPLATE_FILENAME)
 
+# Internal Database for Venue Details
 VENUES = {
-    "The Social": {"address": "5 Little Portland Street", "postcode": "W1W 7JD", "tel": "020 7636 4992", "position": "Venue Manager"},
-    "The Windmill Brixton": {"address": "22 Blenheim Gardens", "postcode": "SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
+    "The Social": {
+        "address": "5 Little Portland Street, London",
+        "postcode": "W1W 7JD",
+        "tel": "020 7636 4992",
+        "position": "Venue Manager"
+    },
+    "The Windmill Brixton": {
+        "address": "22 Blenheim Gardens, London",
+        "postcode": "SW2 5BZ",
+        "tel": "020 8671 0700",
+        "position": "Promoter"
+    }
 }
 
 # --- 2. THE BULLETPROOF DATE NORMALIZER ---
 def normalize_pdf_date(date_str):
-    """Handles 'Saturday 23rd August 2025' with any number of spaces/chars."""
     if not date_str: return None
-    
     try:
-        # Standardize month mapping
         months_map = {
             'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
             'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
         }
-        
-        # 1. Find the month (looking for the first 3 letters of any month)
         found_month = None
-        for month_name, month_num in months_map.items():
-            if month_name in date_str.lower():
-                found_month = month_num
+        for m_name, m_num in months_map.items():
+            if m_name in date_str.lower():
+                found_month = m_num
                 break
         
-        # 2. Find all sequences of digits (Day and Year)
-        # We filter out ordinals (st, nd, rd, th) first
         clean_text = re.sub(r'(st|nd|rd|th)', '', date_str, flags=re.IGNORECASE)
         digits = re.findall(r'\d+', clean_text)
-        
-        day = None
-        year = None
-        
+        day, year = None, None
         for d in digits:
-            if len(d) <= 2:
-                day = d.zfill(2)
-            elif len(d) == 4:
-                year = d
+            if len(d) <= 2: day = d.zfill(2)
+            elif len(d) == 4: year = d
         
         if day and found_month and year:
             return f"{day}.{found_month}.{year}"
-    except:
-        return None
+    except: return None
     return None
 
 # --- 3. CONTRACT PARSING ---
@@ -67,37 +65,39 @@ def extract_contract_data(zip_file):
                     pdf_stream = BytesIO(f.read())
                     try:
                         reader = PdfReader(pdf_stream)
-                        # Extract and merge all pages into one continuous string
-                        full_text = ""
-                        for page in reader.pages:
-                            full_text += page.extract_text() + " "
-                        
-                        # Clean up text (replace multiple spaces/newlines with single space)
+                        full_text = " ".join([p.extract_text() for p in reader.pages])
                         full_text = re.sub(r'\s+', ' ', full_text)
                         
-                        # Flexible Regex with lookaheads
-                        date_re = r"Performance Date\(s\):\s*(.*?)(?=\s*(?:Group /|Today|Times|Ticketing|Venue|$))"
-                        name_re = r"Contact Name:\s*(.*?)(?=\s*(?:Contact Email|Performance|Today|$))"
-                        email_re = r"Contact Email:\s*(.*?)(?=\s*(?:Performance|Group /|Today|$))"
+                        # Identify Venue from internal database
+                        matched_venue = "Unknown Venue"
+                        for v_name in VENUES.keys():
+                            if v_name.lower() in full_text.lower():
+                                matched_venue = v_name
+                                break
+
+                        # Regex for Name, Email, and Date
+                        stop_at = r"(?=\s*(?:Group /|Today|Times|Ticketing|Venue|$))"
+                        date_re = r"Performance Date\(s\):\s*(.*?)" + stop_at
+                        name_re = r"Contact Name:\s*(.*?)" + stop_at
+                        email_re = r"Contact Email:\s*(.*?)" + stop_at
                         
-                        date_match = re.search(date_re, full_text, re.IGNORECASE)
-                        name_match = re.search(name_re, full_text, re.IGNORECASE)
-                        email_match = re.search(email_re, full_text, re.IGNORECASE)
+                        d_m = re.search(date_re, full_text, re.IGNORECASE)
+                        n_m = re.search(name_re, full_text, re.IGNORECASE)
+                        e_m = re.search(email_re, full_text, re.IGNORECASE)
                         
-                        if date_match:
-                            raw_date = date_match.group(1).strip()
-                            norm_date = normalize_pdf_date(raw_date)
-                            
+                        if d_m:
+                            norm_date = normalize_pdf_date(d_m.group(1).strip())
                             if norm_date:
                                 contract_db[norm_date] = {
-                                    "P_NAME": name_match.group(1).strip() if name_match else "Unknown",
-                                    "P_EMAIL": email_match.group(1).strip() if email_match else "",
+                                    "VENUE": matched_venue,
+                                    "P_NAME": n_m.group(1).strip() if n_m else "Unknown",
+                                    "P_EMAIL": e_m.group(1).strip() if e_m else "",
                                     "P_TEL": "See Contract"
                                 }
                     except: continue
     return contract_db
 
-# --- 4. HELPERS & UI ---
+# --- 4. HELPERS ---
 def get_deezer_data(artist_name):
     try:
         search = requests.get(f"https://api.deezer.com/search/artist?q={artist_name}").json()
@@ -108,6 +108,7 @@ def get_deezer_data(artist_name):
     except: return []
     return []
 
+# --- 5. UI ---
 st.set_page_config(page_title="PRS Toolkit Pro", page_icon="🎸", layout="wide")
 page = st.sidebar.selectbox("Select Tool", ["Generate PRS Forms", "Convert Venue Export"])
 
@@ -121,12 +122,14 @@ if page == "Generate PRS Forms":
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for _, row in df.iterrows():
                     songs = get_deezer_data(row['Artist'])
-                    v_info = VENUES.get(row['Venue'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
+                    v_info = VENUES.get(row['Venue Name'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
                     dur = f"{sum(s['seconds'] for s in songs) // 60}m {sum(s['seconds'] for s in songs) % 60:02d}s"
+                    
                     context = {
-                        'V_NAME': row['Venue'], 'V_ADDR': v_info['address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
-                        'DATE': row['Date'], 'ARTIST': row['Artist'], 'P_NAME': row['Promoter Name'], 
-                        'P_EMAIL': row['Promoter Email'], 'P_TEL': row['Promoter Tel'], 'POSITION': v_info['position'], 'TOTAL_DURATION': dur
+                        'V_NAME': row['Venue Name'], 'V_ADDR': row['Venue Address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
+                        'DATE': row['Date'], 'ARTIST': row['Artist'], 
+                        'P_NAME': row['Promoter Name'], 'P_EMAIL': row['Promoter Email'], 'P_TEL': row['Promoter Tel'],
+                        'POSITION': v_info['position'], 'TOTAL_DURATION': dur
                     }
                     doc = DocxTemplate(TEMPLATE_PATH); doc.render(context)
                     table = doc.tables[-1]
@@ -147,19 +150,20 @@ elif page == "Convert Venue Export":
         raw_upload.seek(0)
         temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
         try:
-            # Find data start (The Social appears in the first col of the data rows)
-            header_idx = temp_df[temp_df[0] == "The Social"].index[0]
+            # Find data start row
+            header_idx = temp_df[temp_df.eq("The Social").any(axis=1)].index[0]
             raw_upload.seek(0)
             raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
             
-            cleaned_df = raw_df[[0, 3, 5]].copy()
-            cleaned_df.columns = ['Venue', 'Artist', 'Date']
-            cleaned_df = cleaned_df[cleaned_df['Artist'].notna()]
-            cleaned_df = cleaned_df[cleaned_df['Artist'].str.len() > 2]
+            cleaned_df = raw_df[[3, 5]].copy() # Only take Artist and Date from CSV
+            cleaned_df.columns = ['Artist', 'Date']
+            cleaned_df = cleaned_df[cleaned_df['Artist'].notna() & (cleaned_df['Artist'].str.len() > 2)]
             cleaned_df = cleaned_df[~cleaned_df['Artist'].str.contains("Admissions|categories|Licensee|Details|name|Event /", na=False)]
             cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
             
-            for col in ['Promoter Name', 'Promoter Email', 'Promoter Tel']: cleaned_df[col] = ""
+            # Setup new columns
+            new_cols = ['Venue Name', 'Venue Address', 'Promoter Name', 'Promoter Email', 'Promoter Tel']
+            for col in new_cols: cleaned_df[col] = ""
 
             if contract_zip:
                 contracts = extract_contract_data(contract_zip)
@@ -167,6 +171,10 @@ elif page == "Convert Venue Export":
                     csv_date = str(row['Date']).strip()
                     if csv_date in contracts:
                         info = contracts[csv_date]
+                        v_details = VENUES.get(info['VENUE'], {"address": "Address Unknown", "tel": ""})
+                        
+                        cleaned_df.at[idx, 'Venue Name'] = info['VENUE']
+                        cleaned_df.at[idx, 'Venue Address'] = v_details['address']
                         cleaned_df.at[idx, 'Promoter Name'] = info['P_NAME']
                         cleaned_df.at[idx, 'Promoter Email'] = info['P_EMAIL']
                         cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
