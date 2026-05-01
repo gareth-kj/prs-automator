@@ -10,14 +10,18 @@ from io import BytesIO
 from docxtpl import DocxTemplate
 from pypdf import PdfReader
 
-# Selenium Imports
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+# Attempt to import Selenium - If it fails, the app still runs
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
-# --- 1. CONFIGURATION & VENUE DATABASE ---
+# --- 1. CONFIGURATION ---
 VENUES = {
     "The Social": {
         "address": "5 Little Portland Street, London, W1W 7JD",
@@ -31,9 +35,10 @@ VENUES = {
     }
 }
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "PRS SETLIST TEMPLATE.docx")
+TEMPLATE_FILENAME = "PRS SETLIST TEMPLATE.docx"
+TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), TEMPLATE_FILENAME)
 
-# --- 2. WATERFALL SEARCH (DEEZER -> SPOTIFY -> BANDCAMP) ---
+# --- 2. THE WATERFALL SEARCH ---
 
 def get_deezer_data(artist_name):
     try:
@@ -47,11 +52,15 @@ def get_deezer_data(artist_name):
     return []
 
 def get_songs_waterfall(artist_name):
-    # Stage 1: Deezer
+    # Stage 1: Deezer (Fastest API)
     songs = get_deezer_data(artist_name)
-    if songs: return songs
+    if songs:
+        return songs
 
-    # Stage 2 & 3: Selenium (Headless)
+    # Stage 2: Selenium (Only if environment supports it)
+    if not SELENIUM_AVAILABLE:
+        return []
+
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -60,25 +69,24 @@ def get_songs_waterfall(artist_name):
     try:
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         
-        # Spotify Check (Exact Match Only)
+        # Spotify Check
         driver.get(f"https://open.spotify.com/search/{artist_name.replace(' ', '%20')}/artists")
         time.sleep(3)
         artists = driver.find_elements(By.CSS_SELECTOR, 'a[data-testid="artist-card-container"]')
-        if artists:
-            if artists[0].text.split('\n')[0].lower() == artist_name.lower():
-                artists[0].click()
-                time.sleep(2)
-                tracks = driver.find_elements(By.CSS_SELECTOR, 'div[data-testid="tracklist-row"]')[:10]
-                results = [{"title": t.text.split('\n')[0], "duration": "3:30", "seconds": 210} for t in tracks]
-                driver.quit()
-                return results
+        if artists and artists[0].text.split('\n')[0].lower() == artist_name.lower():
+            artists[0].click()
+            time.sleep(2)
+            tracks = driver.find_elements(By.CSS_SELECTOR, 'div[data-testid="tracklist-row"]')[:10]
+            results = [{"title": t.text.split('\n')[0], "duration": "3:30", "seconds": 210} for t in tracks]
+            driver.quit()
+            return results
 
         # Bandcamp Fallback
         driver.get(f"https://bandcamp.com/search?q={artist_name.replace(' ', '%20')}")
         time.sleep(2)
-        bc_results = driver.find_elements(By.CSS_SELECTOR, ".result-info .heading a")
-        if bc_results:
-            bc_results[0].click()
+        bc_links = driver.find_elements(By.CSS_SELECTOR, ".result-info .heading a")
+        if bc_links:
+            bc_links[0].click()
             time.sleep(2)
             tracks = driver.find_elements(By.CSS_SELECTOR, ".track-title")[:10]
             results = [{"title": t.text, "duration": "4:00", "seconds": 240} for t in tracks]
@@ -86,7 +94,8 @@ def get_songs_waterfall(artist_name):
             return results
             
         driver.quit()
-    except: pass
+    except:
+        pass
     return []
 
 # --- 3. CONTRACT PARSING ---
@@ -129,6 +138,10 @@ def extract_contract_data(zip_file):
 # --- 4. STREAMLIT UI ---
 
 st.set_page_config(page_title="PRS Toolkit Pro", layout="wide")
+
+if not SELENIUM_AVAILABLE:
+    st.sidebar.warning("⚠️ Selenium not detected. Spotify/Bandcamp search disabled. Using Deezer only.")
+
 page = st.sidebar.selectbox("Select Tool", ["Generate PRS Forms", "Convert Venue Export"])
 
 if page == "Generate PRS Forms":
@@ -149,10 +162,15 @@ if page == "Generate PRS Forms":
                     dur_str = f"{total_sec // 60}m {total_sec % 60:02d}s"
                     
                     context = {
-                        'V_NAME': v_name, 'V_ADDR': row.get('Venue Address', v_info['address']),
-                        'V_TEL': v_info['tel'], 'DATE': row['Date'], 'ARTIST': row['Artist'],
-                        'P_NAME': row['Promoter Name'], 'P_EMAIL': row['Promoter Email'],
-                        'P_TEL': row.get('Promoter Tel', 'See Contract'), 'POSITION': v_info['position'],
+                        'V_NAME': v_name, 
+                        'V_ADDR': row.get('Venue Address', v_info['address']),
+                        'V_TEL': v_info['tel'], 
+                        'DATE': row['Date'], 
+                        'ARTIST': row['Artist'],
+                        'P_NAME': row['Promoter Name'], 
+                        'P_EMAIL': row['Promoter Email'],
+                        'P_TEL': row.get('Promoter Tel', 'See Contract'), 
+                        'POSITION': v_info['position'],
                         'TOTAL_DURATION': dur_str
                     }
                     
@@ -163,7 +181,7 @@ if page == "Generate PRS Forms":
                         table.cell(i+1, 1).text = s['title'].upper()
                         table.cell(i+1, 4).text = s['duration']
                     
-                    # Filename: YYYY-MM-DD_PRS_Artist.docx
+                    # ISO Filename Logic
                     try:
                         date_obj = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y")
                         date_iso = date_obj.strftime("%Y-%m-%d")
@@ -190,7 +208,6 @@ elif page == "Convert Venue Export":
             h_idx = temp[temp.eq("The Social").any(axis=1)].index[0]
             raw_upload.seek(0)
             raw_df = pd.read_csv(raw_upload, skiprows=h_idx, header=None)
-            
             cleaned = raw_df[[3, 5]].copy()
             cleaned.columns = ['Artist', 'Date']
             cleaned = cleaned[cleaned['Artist'].notna() & (cleaned['Artist'].str.len() > 2)]
@@ -205,10 +222,10 @@ elif page == "Convert Venue Export":
                     if d in contracts:
                         info = contracts[d]
                         cleaned.at[idx, 'Venue Name'] = info['VENUE']
-                        cleaned.at[idx, 'Venue Address'] = VENUES.get(info['VENUE'], {"address": ""})['address']
+                        cleaned.at[idx, 'Venue Address'] = VENUES.get(info['VENUE'], VENUES["The Social"])['address']
                         cleaned.at[idx, 'Promoter Name'] = info['P_NAME']
-                        cleaned_df.at[idx, 'Promoter Email'] = info['P_EMAIL']
-                        cleaned_df.at[idx, 'Promoter Tel'] = info['P_TEL']
+                        cleaned.at[idx, 'Promoter Email'] = info['P_EMAIL']
+                        cleaned.at[idx, 'Promoter Tel'] = info['P_TEL']
 
             st.data_editor(cleaned, num_rows="dynamic", use_container_width=True)
         except: st.error("CSV Format Error")
