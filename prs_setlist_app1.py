@@ -84,4 +84,59 @@ if page == "Generate PRS Forms":
                     doc.render(context)
                     table = doc.tables[-1] 
                     for i, song in enumerate(songs):
-                        table.cell(i
+                        table.cell(i+1, 1).text = song['title'].upper()
+                        table.cell(i+1, 4).text = song['duration']
+
+                    doc_io = BytesIO()
+                    doc.save(doc_io)
+                    zip_file.writestr(f"PRS_{artist}_{venue_name}.docx", doc_io.getvalue())
+                    progress_bar.progress((index + 1) / len(df))
+
+            st.download_button("📥 Download ZIP Archive", zip_buffer.getvalue(), "PRS_Batch.zip", "application/zip")
+
+# --- PAGE: CONVERT VENUE EXPORT ---
+elif page == "Convert Venue Export":
+    st.title("📂 Venue Export Converter")
+    st.markdown("Upload the raw **'Review Form.csv'** from The Social.")
+
+    raw_upload = st.file_uploader("Upload Raw Venue CSV", type="csv")
+
+    if raw_upload:
+        # Load raw data, skipping header fluff (row 14 is where data usually starts)
+        raw_df = pd.read_csv(raw_upload, skiprows=14, header=None)
+        
+        # Clean: Col 0=Venue, Col 3=Artist, Col 5=Date
+        cleaned_df = raw_df[[0, 3, 5]].copy()
+        cleaned_df.columns = ['Venue', 'Artist', 'Date']
+        
+        # Strip whitespace and remove empty artist rows
+        cleaned_df['Artist'] = cleaned_df['Artist'].astype(str).str.strip()
+        cleaned_df = cleaned_df[~cleaned_df['Artist'].isin(['nan', '', 'None'])]
+        
+        # Remove duplicate ticket rows (collapse into one show per artist per date)
+        cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
+        
+        # Add Promoter Placeholders
+        cleaned_df['Promoter Name'] = "GARETH JOHNSON"
+        cleaned_df['Promoter Address'] = "5 Little Portland St, London"
+        cleaned_df['Promoter Postcode'] = "W1W 7JD"
+        cleaned_df['Promoter Tel'] = "020 7636 4992"
+
+        # Reorder columns
+        cleaned_df = cleaned_df[['Artist', 'Date', 'Venue', 'Promoter Name', 'Promoter Address', 'Promoter Postcode', 'Promoter Tel']]
+
+        st.success(f"Successfully identified {len(cleaned_df)} unique performances.")
+        
+        st.info("💡 **Edit below:** You can double-click cells to fix names or right-click to delete rows. Once finished, click 'Download Formatted CSV'.")
+        
+        # The key feature: the Data Editor
+        edited_df = st.data_editor(cleaned_df, num_rows="dynamic", use_container_width=True)
+
+        # Download logic
+        csv_buffer = edited_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Formatted CSV",
+            data=csv_buffer,
+            file_name=f"cleaned_shows_{pd.Timestamp.now().strftime('%Y-%m-%d')}.csv",
+            mime="text/csv"
+        )
