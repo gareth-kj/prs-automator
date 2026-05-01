@@ -18,63 +18,76 @@ VENUES = {
     "The Windmill Brixton": {"address": "22 Blenheim Gardens", "postcode": "SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
 }
 
-# --- 2. ROBUST DATE NORMALIZER ---
+# --- 2. THE BULLETPROOF DATE NORMALIZER ---
 def normalize_pdf_date(date_str):
-    """Converts 'Saturday 23rd August 2025' to '23.08.2025'."""
+    """Handles 'Saturday 23rd August 2025' with any number of spaces/chars."""
+    if not date_str: return None
+    
     try:
-        # 1. Clean string: remove day names and ordinals (st, nd, rd, th)
-        clean = re.sub(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|st|nd|rd|th)', '', date_str, flags=re.IGNORECASE).strip()
-        
+        # Standardize month mapping
         months_map = {
-            'january': '01', 'february': '02', 'march': '03', 'april': '04', 'may': '05', 'june': '06',
-            'july': '07', 'august': '08', 'september': '09', 'october': '10', 'november': '11', 'december': '12',
-            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'jun': '06', 'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+            'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
         }
         
-        # 2. Extract digits for day/year and words for month
-        parts = clean.split()
-        day = ""
-        month = ""
-        year = ""
+        # 1. Find the month (looking for the first 3 letters of any month)
+        found_month = None
+        for month_name, month_num in months_map.items():
+            if month_name in date_str.lower():
+                found_month = month_num
+                break
         
-        for p in parts:
-            p_lower = p.lower().strip()
-            if p_lower in months_map:
-                month = months_map[p_lower]
-            elif p.isdigit():
-                if len(p) <= 2: day = p.zfill(2)
-                if len(p) == 4: year = p
+        # 2. Find all sequences of digits (Day and Year)
+        # We filter out ordinals (st, nd, rd, th) first
+        clean_text = re.sub(r'(st|nd|rd|th)', '', date_str, flags=re.IGNORECASE)
+        digits = re.findall(r'\d+', clean_text)
         
-        if day and month and year:
-            return f"{day}.{month}.{year}"
+        day = None
+        year = None
+        
+        for d in digits:
+            if len(d) <= 2:
+                day = d.zfill(2)
+            elif len(d) == 4:
+                year = d
+        
+        if day and found_month and year:
+            return f"{day}.{found_month}.{year}"
     except:
         return None
     return None
 
-# --- 3. CONTRACT PARSING LOGIC ---
+# --- 3. CONTRACT PARSING ---
 def extract_contract_data(zip_file):
     contract_db = {}
     with zipfile.ZipFile(zip_file) as z:
         for filename in z.namelist():
-            if filename.endswith(".pdf") and not filename.startswith("__MACOSX"):
+            if filename.lower().endswith(".pdf") and not filename.startswith("__MACOSX"):
                 with z.open(filename) as f:
                     pdf_stream = BytesIO(f.read())
                     try:
                         reader = PdfReader(pdf_stream)
-                        text = " ".join([page.extract_text() for page in reader.pages]).replace('\n', ' ')
+                        # Extract and merge all pages into one continuous string
+                        full_text = ""
+                        for page in reader.pages:
+                            full_text += page.extract_text() + " "
                         
-                        # Flexible Regex: Stops at any common next field header
-                        stop_at = r"(?=\s*(?:Group /|Today’s|Times|Ticketing|Venue|Contact|$))"
-                        date_re = r"Performance Date\(s\):\s*(.*?)" + stop_at
-                        name_re = r"Contact Name:\s*(.*?)" + stop_at
-                        email_re = r"Contact Email:\s*(.*?)" + stop_at
+                        # Clean up text (replace multiple spaces/newlines with single space)
+                        full_text = re.sub(r'\s+', ' ', full_text)
                         
-                        date_match = re.search(date_re, text, re.IGNORECASE)
-                        name_match = re.search(name_re, text, re.IGNORECASE)
-                        email_match = re.search(email_re, text, re.IGNORECASE)
+                        # Flexible Regex with lookaheads
+                        date_re = r"Performance Date\(s\):\s*(.*?)(?=\s*(?:Group /|Today|Times|Ticketing|Venue|$))"
+                        name_re = r"Contact Name:\s*(.*?)(?=\s*(?:Contact Email|Performance|Today|$))"
+                        email_re = r"Contact Email:\s*(.*?)(?=\s*(?:Performance|Group /|Today|$))"
+                        
+                        date_match = re.search(date_re, full_text, re.IGNORECASE)
+                        name_match = re.search(name_re, full_text, re.IGNORECASE)
+                        email_match = re.search(email_re, full_text, re.IGNORECASE)
                         
                         if date_match:
-                            norm_date = normalize_pdf_date(date_match.group(1).strip())
+                            raw_date = date_match.group(1).strip()
+                            norm_date = normalize_pdf_date(raw_date)
+                            
                             if norm_date:
                                 contract_db[norm_date] = {
                                     "P_NAME": name_match.group(1).strip() if name_match else "Unknown",
@@ -84,7 +97,7 @@ def extract_contract_data(zip_file):
                     except: continue
     return contract_db
 
-# --- 4. HELPERS ---
+# --- 4. HELPERS & UI ---
 def get_deezer_data(artist_name):
     try:
         search = requests.get(f"https://api.deezer.com/search/artist?q={artist_name}").json()
@@ -95,7 +108,6 @@ def get_deezer_data(artist_name):
     except: return []
     return []
 
-# --- 5. UI ---
 st.set_page_config(page_title="PRS Toolkit Pro", page_icon="🎸", layout="wide")
 page = st.sidebar.selectbox("Select Tool", ["Generate PRS Forms", "Convert Venue Export"])
 
@@ -111,12 +123,10 @@ if page == "Generate PRS Forms":
                     songs = get_deezer_data(row['Artist'])
                     v_info = VENUES.get(row['Venue'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
                     dur = f"{sum(s['seconds'] for s in songs) // 60}m {sum(s['seconds'] for s in songs) % 60:02d}s"
-                    
                     context = {
                         'V_NAME': row['Venue'], 'V_ADDR': v_info['address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
-                        'DATE': row['Date'], 'ARTIST': row['Artist'], 
-                        'P_NAME': row['Promoter Name'], 'P_EMAIL': row['Promoter Email'], 'P_TEL': row['Promoter Tel'],
-                        'POSITION': v_info['position'], 'TOTAL_DURATION': dur
+                        'DATE': row['Date'], 'ARTIST': row['Artist'], 'P_NAME': row['Promoter Name'], 
+                        'P_EMAIL': row['Promoter Email'], 'P_TEL': row['Promoter Tel'], 'POSITION': v_info['position'], 'TOTAL_DURATION': dur
                     }
                     doc = DocxTemplate(TEMPLATE_PATH); doc.render(context)
                     table = doc.tables[-1]
@@ -137,8 +147,8 @@ elif page == "Convert Venue Export":
         raw_upload.seek(0)
         temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
         try:
-            # Find the start row by looking for the "The Social" cell
-            header_idx = temp_df[temp_df.eq("The Social").any(axis=1)].index[0]
+            # Find data start (The Social appears in the first col of the data rows)
+            header_idx = temp_df[temp_df[0] == "The Social"].index[0]
             raw_upload.seek(0)
             raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
             
