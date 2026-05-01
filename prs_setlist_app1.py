@@ -8,35 +8,30 @@ from docxtpl import DocxTemplate
 from io import BytesIO
 from pypdf import PdfReader
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & VENUE DATABASE ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_FILENAME = "PRS SETLIST TEMPLATE.docx"
 TEMPLATE_PATH = os.path.join(BASE_DIR, TEMPLATE_FILENAME)
 
-# Internal Database for Venue Details
 VENUES = {
     "The Social": {
-        "address": "5 Little Portland Street, London",
-        "postcode": "W1W 7JD",
+        "address": "5 Little Portland Street, London, W1W 7JD",
         "tel": "020 7636 4992",
         "position": "Venue Manager"
     },
     "The Windmill Brixton": {
-        "address": "22 Blenheim Gardens, London",
-        "postcode": "SW2 5BZ",
+        "address": "22 Blenheim Gardens, London, SW2 5BZ",
         "tel": "020 8671 0700",
         "position": "Promoter"
     }
 }
 
-# --- 2. THE BULLETPROOF DATE NORMALIZER ---
+# --- 2. DATE NORMALIZER ---
 def normalize_pdf_date(date_str):
     if not date_str: return None
     try:
-        months_map = {
-            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
-            'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
-        }
+        months_map = {'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+                      'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'}
         found_month = None
         for m_name, m_num in months_map.items():
             if m_name in date_str.lower():
@@ -55,7 +50,7 @@ def normalize_pdf_date(date_str):
     except: return None
     return None
 
-# --- 3. CONTRACT PARSING ---
+# --- 3. CONTRACT PARSING (WITH TIGHTER FILTERS) ---
 def extract_contract_data(zip_file):
     contract_db = {}
     with zipfile.ZipFile(zip_file) as z:
@@ -68,18 +63,20 @@ def extract_contract_data(zip_file):
                         full_text = " ".join([p.extract_text() for p in reader.pages])
                         full_text = re.sub(r'\s+', ' ', full_text)
                         
-                        # Identify Venue from internal database
+                        # Identify Venue
                         matched_venue = "Unknown Venue"
                         for v_name in VENUES.keys():
                             if v_name.lower() in full_text.lower():
                                 matched_venue = v_name
                                 break
 
-                        # Regex for Name, Email, and Date
-                        stop_at = r"(?=\s*(?:Group /|Today|Times|Ticketing|Venue|$))"
-                        date_re = r"Performance Date\(s\):\s*(.*?)" + stop_at
-                        name_re = r"Contact Name:\s*(.*?)" + stop_at
-                        email_re = r"Contact Email:\s*(.*?)" + stop_at
+                        # TIGHTER REGEX: Stop at any word that looks like a Header (Capital followed by colon)
+                        # or specific keywords like Performance, Contact, Group, Today
+                        stop_pattern = r"(?=\s*(?:Contact|Performance|Group|Today|Times|Ticketing|Venue|[A-Z][a-z]+:|$))"
+                        
+                        date_re = r"Performance Date\(s\):\s*(.*?)" + stop_pattern
+                        name_re = r"Contact Name:\s*(.*?)" + stop_pattern
+                        email_re = r"Contact Email:\s*(.*?)" + stop_pattern
                         
                         d_m = re.search(date_re, full_text, re.IGNORECASE)
                         n_m = re.search(name_re, full_text, re.IGNORECASE)
@@ -106,7 +103,6 @@ def get_deezer_data(artist_name):
             tracks = requests.get(f"https://api.deezer.com/artist/{a_id}/top?limit=10").json()
             return [{"title": t['title'], "duration": f"{int(t['duration'])//60}:{int(t['duration'])%60:02d}", "seconds": int(t['duration'])} for t in tracks.get('data', [])]
     except: return []
-    return []
 
 # --- 5. UI ---
 st.set_page_config(page_title="PRS Toolkit Pro", page_icon="🎸", layout="wide")
@@ -122,11 +118,11 @@ if page == "Generate PRS Forms":
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for _, row in df.iterrows():
                     songs = get_deezer_data(row['Artist'])
-                    v_info = VENUES.get(row['Venue Name'], {"address": "", "postcode": "", "tel": "", "position": "Promoter"})
+                    v_info = VENUES.get(row['Venue Name'], {"address": "", "tel": "", "position": "Promoter"})
                     dur = f"{sum(s['seconds'] for s in songs) // 60}m {sum(s['seconds'] for s in songs) % 60:02d}s"
                     
                     context = {
-                        'V_NAME': row['Venue Name'], 'V_ADDR': row['Venue Address'], 'V_POST': v_info['postcode'], 'V_TEL': v_info['tel'],
+                        'V_NAME': row['Venue Name'], 'V_ADDR': row['Venue Address'], 'V_TEL': v_info['tel'],
                         'DATE': row['Date'], 'ARTIST': row['Artist'], 
                         'P_NAME': row['Promoter Name'], 'P_EMAIL': row['Promoter Email'], 'P_TEL': row['Promoter Tel'],
                         'POSITION': v_info['position'], 'TOTAL_DURATION': dur
@@ -150,20 +146,19 @@ elif page == "Convert Venue Export":
         raw_upload.seek(0)
         temp_df = pd.read_csv(raw_upload, header=None, nrows=50)
         try:
-            # Find data start row
             header_idx = temp_df[temp_df.eq("The Social").any(axis=1)].index[0]
             raw_upload.seek(0)
             raw_df = pd.read_csv(raw_upload, skiprows=header_idx, header=None)
             
-            cleaned_df = raw_df[[3, 5]].copy() # Only take Artist and Date from CSV
+            cleaned_df = raw_df[[3, 5]].copy()
             cleaned_df.columns = ['Artist', 'Date']
             cleaned_df = cleaned_df[cleaned_df['Artist'].notna() & (cleaned_df['Artist'].str.len() > 2)]
             cleaned_df = cleaned_df[~cleaned_df['Artist'].str.contains("Admissions|categories|Licensee|Details|name|Event /", na=False)]
             cleaned_df = cleaned_df.drop_duplicates(subset=['Artist', 'Date'])
             
-            # Setup new columns
-            new_cols = ['Venue Name', 'Venue Address', 'Promoter Name', 'Promoter Email', 'Promoter Tel']
-            for col in new_cols: cleaned_df[col] = ""
+            # Prepare Venue and Promoter Columns
+            for col in ['Venue Name', 'Venue Address', 'Promoter Name', 'Promoter Email', 'Promoter Tel']:
+                cleaned_df[col] = ""
 
             if contract_zip:
                 contracts = extract_contract_data(contract_zip)
@@ -171,7 +166,7 @@ elif page == "Convert Venue Export":
                     csv_date = str(row['Date']).strip()
                     if csv_date in contracts:
                         info = contracts[csv_date]
-                        v_details = VENUES.get(info['VENUE'], {"address": "Address Unknown", "tel": ""})
+                        v_details = VENUES.get(info['VENUE'], {"address": "Address Unknown"})
                         
                         cleaned_df.at[idx, 'Venue Name'] = info['VENUE']
                         cleaned_df.at[idx, 'Venue Address'] = v_details['address']
