@@ -1,1 +1,3 @@
 playwright
+chromium
+chromium-stealth
