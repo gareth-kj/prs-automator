@@ -11,7 +11,6 @@ from io import BytesIO
 from docxtpl import DocxTemplate
 
 # --- 1. ENVIRONMENT & PATHS ---
-# Force Playwright to store browsers in the app's local directory
 PW_BROWSER_PATH = os.path.join(os.getcwd(), "pw-browsers")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PW_BROWSER_PATH
 TEMPLATE_PATH = os.path.join(os.getcwd(), "PRS SETLIST TEMPLATE.docx")
@@ -41,25 +40,18 @@ def sec_to_format(total_sec):
 
 # --- 3. THE SCRAPER ENGINE (STAGE 3) ---
 def stage_3_playwright_scrape(url):
-    """
-    Scrapes Spotify/Bandcamp using Playwright. 
-    Handles local installation to avoid Streamlit permission errors.
-    """
     try:
         if not os.path.exists(PW_BROWSER_PATH):
             os.makedirs(PW_BROWSER_PATH)
         
-        # Check if browser binaries exist in our local path
-        # If not, install them (without --with-deps to avoid sudo errors)
         if not os.listdir(PW_BROWSER_PATH):
             with st.spinner("Downloading browser engine (First-time setup)..."):
                 subprocess.run(["playwright", "install", "chromium"], check=True)
 
         from playwright.sync_api import sync_playwright
-        from playwright_stealth import Stealth
+        import playwright_stealth
 
         with sync_playwright() as p:
-            # Launch with specific flags for Streamlit's containerized environment
             browser = p.chromium.launch(
                 headless=True, 
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
@@ -69,15 +61,22 @@ def stage_3_playwright_scrape(url):
             )
             page = context.new_page()
             
-            # Apply 2026 Stealth Class
-            Stealth().apply(page)
+            # --- VERSION AGNOSTIC STEALTH ---
+            try:
+                # Try v1.x Function Syntax
+                playwright_stealth.stealth_sync(page)
+            except AttributeError:
+                try:
+                    # Try v2.x Class Syntax
+                    from playwright_stealth import Stealth
+                    Stealth().apply(page)
+                except:
+                    pass # Proceed without stealth if both fail
             
-            # Navigate
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(5) # Buffer for JavaScript table hydration
+            time.sleep(5) 
             
             tracks = []
-            # Target common music platform row selectors
             rows = page.query_selector_all('div[role="row"], .track_row_view, [data-testid="tracklist-row"], .tracklist-item')
             
             for row in rows[:10]:
@@ -86,7 +85,6 @@ def stage_3_playwright_scrape(url):
                     clean_text = [t.strip() for t in text_parts if len(t.strip()) > 1]
                     if not clean_text: continue
                     
-                    # Heuristic: longest string is title, string with ':' is duration
                     name = max(clean_text, key=len).upper()
                     dur = next((t for t in clean_text if ":" in t and len(t) <= 5), "03:30")
                     tracks.append({"Track Name": name, "Length": dur})
@@ -111,18 +109,16 @@ if uploaded_file:
     df = pd.read_csv(uploaded_file)
     st.info(f"Loaded {len(df)} artists.")
 
-    # AUTOMATED WATERFALL BUTTON
     if st.button("🚀 Run Automated Search (Deezer + YT Music)"):
         p_text = st.empty()
         p_bar = st.progress(0)
         
         for i, row in df.iterrows():
             art = str(row['Artist']).strip()
-            p_text.text(f"Searching: {art}...")
+            p_text.text(f"Processing: {art}...")
             
             if art not in st.session_state.setlists or st.session_state.setlists[art].empty:
                 data = None
-                # Stage 1: Deezer API
                 try:
                     r = requests.get(f"https://api.deezer.com/search/artist?q={art}", timeout=5).json()
                     if r.get('data'):
@@ -131,7 +127,6 @@ if uploaded_file:
                         data = [{"Track Name": s['title'].upper(), "Length": f"{s['duration']//60}:{s['duration']%60:02d}"} for s in t['data']]
                 except: pass
                 
-                # Stage 2: YT Music API
                 if not data and yt:
                     try:
                         s = yt.search(art, filter="artists")[0]
@@ -145,7 +140,6 @@ if uploaded_file:
             p_bar.progress((i + 1) / len(df))
         st.rerun()
 
-    # MANUAL REVIEW / OVERRIDE LIST
     st.divider()
     for idx, row in df.iterrows():
         art = str(row['Artist']).strip()
@@ -163,7 +157,6 @@ if uploaded_file:
                         st.session_state.setlists[art] = pd.DataFrame(res)
                         st.rerun()
 
-            # Data Editor for manual tweaks
             st.session_state.setlists[art] = st.data_editor(
                 st.session_state.setlists[art],
                 num_rows="dynamic",
@@ -171,15 +164,13 @@ if uploaded_file:
                 use_container_width=True
             )
             
-            # Show total duration per artist
             total_s = sum(dur_to_sec(l) for l in st.session_state.setlists[art]["Length"] if pd.notnull(l))
             st.metric("Total Set Duration", sec_to_format(total_s))
 
-    # BATCH EXPORT
     st.divider()
     if st.button("🚀 Finalize & Generate PRS ZIP", type="primary"):
         if not os.path.exists(TEMPLATE_PATH):
-            st.error(f"Template not found! Please upload 'PRS SETLIST TEMPLATE.docx' to GitHub.")
+            st.error(f"Template not found! Upload 'PRS SETLIST TEMPLATE.docx' to GitHub.")
         else:
             zip_buffer = BytesIO()
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_f:
@@ -188,7 +179,6 @@ if uploaded_file:
                     s_df = st.session_state.setlists.get(art, pd.DataFrame())
                     total_s = sum(dur_to_sec(l) for l in s_df["Length"] if pd.notnull(l))
                     
-                    # Get venue details
                     v_name = row.get('Venue Name', 'The Social')
                     v_info = VENUES.get(v_name, VENUES["The Social"])
                     
@@ -202,14 +192,12 @@ if uploaded_file:
                         'TOTAL_DURATION': sec_to_format(total_s)
                     })
                     
-                    # Fill the track table in the Word Doc (assumes table is last in doc)
                     table = doc.tables[-1]
                     for i, (_, s_row) in enumerate(s_df.iterrows()):
-                        if i >= 10: break # Standard template row limit
+                        if i >= 10: break
                         table.cell(i+1, 1).text = str(s_row["Track Name"]).upper()
                         table.cell(i+1, 4).text = str(s_row["Length"])
                     
-                    # Create unique filename
                     try:
                         d_iso = datetime.strptime(str(row['Date']), "%d.%m.%Y").strftime("%Y-%m-%d")
                     except:
