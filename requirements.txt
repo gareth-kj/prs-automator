@@ -9,3 +9,5 @@ webdriver-manager
 selenium-stealth
 beautifulsoup4
 ytmusicapi
+playwright
+playwright-stealth
