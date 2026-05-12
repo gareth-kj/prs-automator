@@ -3,3 +3,5 @@ chromium
 libgbm1
 libnss3
 libasound2
+libatk-bridge2.0-0
+libgtk-3-0
