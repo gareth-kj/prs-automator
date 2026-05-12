@@ -38,7 +38,7 @@ def dur_to_sec(dur_str):
 def sec_to_format(total_sec):
     return f"{total_sec // 60}m {total_sec % 60:02d}s"
 
-# --- 3. THE SCRAPER ENGINE (STAGE 3 - ADVANCED) ---
+# --- 3. THE SCRAPER ENGINE (STAGE 3 - DEEP EXPANSION) ---
 def stage_3_playwright_scrape(url):
     try:
         if not os.path.exists(PW_BROWSER_PATH):
@@ -70,37 +70,41 @@ def stage_3_playwright_scrape(url):
                     Stealth().apply(page)
                 except: pass 
             
-            # 1. Load Page
-            page.goto(url, wait_until="networkidle", timeout=45000)
-            time.sleep(3) 
+            # 1. Load Page with high timeout
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            time.sleep(4) 
 
-            # 2. Handle Cookie Banner (Prevents blocked clicks)
+            # 2. Handle Cookie Banner (Prevents blocking clicks)
             try:
-                cookie_btn = page.get_by_role("button", name="Accept Cookies").or_(page.locator("#onetrust-accept-btn-handler"))
+                cookie_btn = page.locator('button:has-text("Accept Cookies"), #onetrust-accept-btn-handler').first
                 if cookie_btn.is_visible():
-                    cookie_btn.click()
+                    cookie_btn.click(timeout=2000)
                     time.sleep(1)
             except: pass
 
-            # 3. Expand Spotify "Popular" List
+            # 3. SCROLL & CLICK "SHOW MORE" (Spotify Fix)
             try:
-                page.mouse.wheel(0, 800) # Scroll to trigger button visibility
-                time.sleep(1)
+                # Scroll to 'Popular' section to trigger lazy load
+                pop_section = page.get_by_role("heading", name="Popular")
+                if pop_section.is_visible():
+                    pop_section.scroll_into_view_if_needed()
+                    time.sleep(1)
+                
+                # Force click the button even if obscured by transparent layers
                 show_more = page.locator('button:has-text("Show more")').first
                 if show_more.is_visible():
-                    show_more.scroll_into_view_if_needed()
                     show_more.click(force=True)
-                    time.sleep(2) 
+                    time.sleep(3) # Wait for tracks 6-10 to render
             except: pass
 
-            # 4. Scrape tracks
+            # 4. Scrape tracks with de-duplication
             tracks = []
             seen_names = set() 
             
-            # Target Spotify specific rows or fallbacks
+            # Precise Spotify selector
             rows = page.locator('[data-testid="tracklist-row"]').all()
             if not rows:
-                rows = page.query_selector_all('div[role="row"], .track_row_view, .tracklist-item')
+                rows = page.query_selector_all('div[role="row"], .tracklist-item')
 
             for row in rows:
                 if len(tracks) >= 10: break
@@ -230,4 +234,5 @@ if uploaded_file:
                     doc.save(doc_io)
                     zip_f.writestr(f"{d_iso}_PRS_{art.replace(' ', '_')}.docx", doc_io.getvalue())
             
-            st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "PRS_Batch.zip")
+            st.success("Batch Processing Complete!")
+            st.download_button("📥 Download All PRS Forms (ZIP)", zip_buffer.getvalue(), "PRS_Forms_Export.zip")
