@@ -38,7 +38,7 @@ def dur_to_sec(dur_str):
 def sec_to_format(total_sec):
     return f"{total_sec // 60}m {total_sec % 60:02d}s"
 
-# --- 3. THE SCRAPER ENGINE (STAGE 3) ---
+# --- 3. THE SCRAPER ENGINE (STAGE 3 - ADVANCED) ---
 def stage_3_playwright_scrape(url):
     try:
         if not os.path.exists(PW_BROWSER_PATH):
@@ -64,44 +64,61 @@ def stage_3_playwright_scrape(url):
             # Stealth Handling
             try:
                 playwright_stealth.stealth_sync(page)
-            except AttributeError:
+            except:
                 try:
                     from playwright_stealth import Stealth
                     Stealth().apply(page)
-                except:
-                    pass 
+                except: pass 
             
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(5) 
+            # 1. Load Page
+            page.goto(url, wait_until="networkidle", timeout=45000)
+            time.sleep(3) 
 
-            # --- EXPAND LIST (SPOTIFY FIX) ---
+            # 2. Handle Cookie Banner (Prevents blocked clicks)
             try:
-                # Attempts to click "Show more" or "See more" to get past the 5-song limit
-                btn = page.get_by_role("button", name="Show more").or_(page.get_by_text("Show more"))
-                if btn.is_visible():
-                    btn.click()
-                    time.sleep(2) 
-            except:
-                pass
+                cookie_btn = page.get_by_role("button", name="Accept Cookies").or_(page.locator("#onetrust-accept-btn-handler"))
+                if cookie_btn.is_visible():
+                    cookie_btn.click()
+                    time.sleep(1)
+            except: pass
 
+            # 3. Expand Spotify "Popular" List
+            try:
+                page.mouse.wheel(0, 800) # Scroll to trigger button visibility
+                time.sleep(1)
+                show_more = page.locator('button:has-text("Show more")').first
+                if show_more.is_visible():
+                    show_more.scroll_into_view_if_needed()
+                    show_more.click(force=True)
+                    time.sleep(2) 
+            except: pass
+
+            # 4. Scrape tracks
             tracks = []
             seen_names = set() 
             
-            rows = page.query_selector_all('div[role="row"], .track_row_view, [data-testid="tracklist-row"], .tracklist-item')
-            
+            # Target Spotify specific rows or fallbacks
+            rows = page.locator('[data-testid="tracklist-row"]').all()
+            if not rows:
+                rows = page.query_selector_all('div[role="row"], .track_row_view, .tracklist-item')
+
             for row in rows:
                 if len(tracks) >= 10: break
                 try:
-                    text_parts = row.inner_text().split('\n')
+                    text_content = row.inner_text()
+                    text_parts = text_content.split('\n')
                     clean_text = [t.strip() for t in text_parts if len(t.strip()) > 1]
                     if not clean_text: continue
                     
                     name = max(clean_text, key=len).upper()
-                    
-                    if name in seen_names:
-                        continue
+                    if name in seen_names: continue
                         
-                    dur = next((t for t in clean_text if ":" in t and len(t) <= 5), "03:30")
+                    dur = "03:30"
+                    for t in clean_text:
+                        if ":" in t and len(t) <= 5 and any(c.isdigit() for c in t):
+                            dur = t
+                            break
+                            
                     tracks.append({"Track Name": name, "Length": dur})
                     seen_names.add(name)
                 except: continue
@@ -127,11 +144,9 @@ if uploaded_file:
     if st.button("🚀 Run Automated Search (Deezer + YT Music)"):
         p_text = st.empty()
         p_bar = st.progress(0)
-        
         for i, row in df.iterrows():
             art = str(row['Artist']).strip()
             p_text.text(f"Processing: {art}...")
-            
             if art not in st.session_state.setlists or st.session_state.setlists[art].empty:
                 data = None
                 try:
@@ -145,13 +160,11 @@ if uploaded_file:
                 if not data and yt:
                     try:
                         s = yt.search(art, filter="artists")[0]
-                        artist_data = yt.get_artist(s['browseId'])
-                        songs = artist_data.get('songs', {}).get('results', [])
+                        songs = yt.get_artist(s['browseId'])['songs']['results']
                         data = [{"Track Name": sg['title'].upper(), "Length": sg.get('duration', '03:45')} for sg in songs[:10]]
                     except: pass
                 
                 st.session_state.setlists[art] = pd.DataFrame(data) if data else pd.DataFrame(columns=["Track Name", "Length"])
-            
             p_bar.progress((i + 1) / len(df))
         st.rerun()
 
@@ -185,7 +198,7 @@ if uploaded_file:
     st.divider()
     if st.button("🚀 Finalize & Generate PRS ZIP", type="primary"):
         if not os.path.exists(TEMPLATE_PATH):
-            st.error(f"Template not found! Upload 'PRS SETLIST TEMPLATE.docx' to GitHub.")
+            st.error(f"Template missing from GitHub!")
         else:
             zip_buffer = BytesIO()
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_f:
@@ -193,18 +206,13 @@ if uploaded_file:
                     art = str(row['Artist']).strip()
                     s_df = st.session_state.setlists.get(art, pd.DataFrame())
                     total_s = sum(dur_to_sec(l) for l in s_df["Length"] if pd.notnull(l))
-                    
-                    v_name = row.get('Venue Name', 'The Social')
-                    v_info = VENUES.get(v_name, VENUES["The Social"])
+                    v_info = VENUES.get(row.get('Venue Name', 'The Social'), VENUES["The Social"])
                     
                     doc = DocxTemplate(TEMPLATE_PATH)
                     doc.render({
-                        'V_NAME': v_name,
-                        'V_ADDR': v_info['address'],
-                        'V_TEL': v_info['tel'],
-                        'DATE': row['Date'],
-                        'ARTIST': art,
-                        'TOTAL_DURATION': sec_to_format(total_s)
+                        'V_NAME': row.get('Venue Name', 'The Social'),
+                        'V_ADDR': v_info['address'], 'V_TEL': v_info['tel'],
+                        'DATE': row['Date'], 'ARTIST': art, 'TOTAL_DURATION': sec_to_format(total_s)
                     })
                     
                     table = doc.tables[-1]
@@ -222,5 +230,4 @@ if uploaded_file:
                     doc.save(doc_io)
                     zip_f.writestr(f"{d_iso}_PRS_{art.replace(' ', '_')}.docx", doc_io.getvalue())
             
-            st.success("ZIP Ready!")
-            st.download_button("📥 Download All PRS Forms", zip_buffer.getvalue(), "PRS_Batch_Export.zip")
+            st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "PRS_Batch.zip")
