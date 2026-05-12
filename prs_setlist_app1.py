@@ -11,10 +11,12 @@ from io import BytesIO
 from docxtpl import DocxTemplate
 
 # --- 1. ENVIRONMENT & PATHS ---
+# Force Playwright to use a local directory for browser binaries
 PW_BROWSER_PATH = os.path.join(os.getcwd(), "pw-browsers")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PW_BROWSER_PATH
 TEMPLATE_PATH = os.path.join(os.getcwd(), "PRS SETLIST TEMPLATE.docx")
 
+# Default Venue Info
 VENUES = {
     "The Social": {"address": "5 Little Portland Street, London, W1W 7JD", "tel": "020 7636 4992"},
     "The Windmill Brixton": {"address": "22 Blenheim Gardens, London, SW2 5BZ", "tel": "020 8671 0700"}
@@ -38,14 +40,14 @@ def dur_to_sec(dur_str):
 def sec_to_format(total_sec):
     return f"{total_sec // 60}m {total_sec % 60:02d}s"
 
-# --- 3. THE SCRAPER ENGINE (STAGE 3 - DEEP EXPANSION) ---
+# --- 3. THE SCRAPER ENGINE (STAGE 3 - RETRY LOOP EXPANSION) ---
 def stage_3_playwright_scrape(url):
     try:
         if not os.path.exists(PW_BROWSER_PATH):
             os.makedirs(PW_BROWSER_PATH)
         
         if not os.listdir(PW_BROWSER_PATH):
-            with st.spinner("Downloading browser engine..."):
+            with st.spinner("Downloading browser engine (First-time setup)..."):
                 subprocess.run(["playwright", "install", "chromium"], check=True)
 
         from playwright.sync_api import sync_playwright
@@ -61,7 +63,7 @@ def stage_3_playwright_scrape(url):
             )
             page = context.new_page()
             
-            # Stealth Handling
+            # Stealth Handling for version compatibility
             try:
                 playwright_stealth.stealth_sync(page)
             except:
@@ -70,58 +72,65 @@ def stage_3_playwright_scrape(url):
                     Stealth().apply(page)
                 except: pass 
             
-            # 1. Load Page with high timeout
+            # 1. Load Page with generous timeout
             page.goto(url, wait_until="networkidle", timeout=60000)
-            time.sleep(4) 
+            time.sleep(5) 
 
-            # 2. Handle Cookie Banner (Prevents blocking clicks)
+            # 2. Clear Overlays (Cookie Consent/Popups)
             try:
-                cookie_btn = page.locator('button:has-text("Accept Cookies"), #onetrust-accept-btn-handler').first
-                if cookie_btn.is_visible():
-                    cookie_btn.click(timeout=2000)
-                    time.sleep(1)
+                page.locator('button:has-text("Accept"), #onetrust-accept-btn-handler, [aria-label="Close"]').first.click(timeout=3000)
+                time.sleep(1)
             except: pass
 
-            # 3. SCROLL & CLICK "SHOW MORE" (Spotify Fix)
-            try:
-                # Scroll to 'Popular' section to trigger lazy load
-                pop_section = page.get_by_role("heading", name="Popular")
-                if pop_section.is_visible():
-                    pop_section.scroll_into_view_if_needed()
-                    time.sleep(1)
+            # 3. ADVANCED EXPANSION RETRY LOOP
+            # This loop forces the browser to find and click "Show more" up to 3 times
+            for _ in range(3):
+                visible_count = page.locator('[data-testid="tracklist-row"]').count()
+                if visible_count >= 10:
+                    break
                 
-                # Force click the button even if obscured by transparent layers
-                show_more = page.locator('button:has-text("Show more")').first
-                if show_more.is_visible():
-                    show_more.click(force=True)
-                    time.sleep(3) # Wait for tracks 6-10 to render
-            except: pass
+                try:
+                    page.mouse.wheel(0, 1000) # Scroll to trigger button visibility
+                    time.sleep(1)
+                    
+                    # Try targeting by ID (most stable), then Role, then Text
+                    show_more = page.get_by_test_id("show-more-button").or_(
+                        page.get_by_role("button", name="Show more")
+                    ).or_(
+                        page.locator('button:has-text("Show more")')
+                    ).first
+                    
+                    if show_more.is_visible():
+                        show_more.scroll_into_view_if_needed()
+                        show_more.click(force=True) # force=True bypasses transparent overlays
+                        time.sleep(3) # Wait for network to fetch new rows
+                except:
+                    pass
 
-            # 4. Scrape tracks with de-duplication
+            # 4. Final Scrape with De-duplication
             tracks = []
             seen_names = set() 
             
-            # Precise Spotify selector
+            # Use Spotify's official test ID for rows
             rows = page.locator('[data-testid="tracklist-row"]').all()
             if not rows:
-                rows = page.query_selector_all('div[role="row"], .tracklist-item')
+                rows = page.query_selector_all('div[role="row"]')
 
             for row in rows:
                 if len(tracks) >= 10: break
                 try:
                     text_content = row.inner_text()
-                    text_parts = text_content.split('\n')
-                    clean_text = [t.strip() for t in text_parts if len(t.strip()) > 1]
-                    if not clean_text: continue
+                    parts = [t.strip() for t in text_content.split('\n') if len(t.strip()) > 1]
+                    if not parts: continue
                     
-                    name = max(clean_text, key=len).upper()
+                    # Heuristic: Filter out metadata. Title is usually the longest string without ':'
+                    title_candidates = [p for p in parts if ":" not in p and not p.replace(',', '').isdigit()]
+                    name = max(title_candidates, key=len).upper() if title_candidates else parts[0].upper()
+                    
                     if name in seen_names: continue
                         
-                    dur = "03:30"
-                    for t in clean_text:
-                        if ":" in t and len(t) <= 5 and any(c.isdigit() for c in t):
-                            dur = t
-                            break
+                    # Duration is the segment containing a colon
+                    dur = next((p for p in parts if ":" in p and len(p) <= 5), "03:30")
                             
                     tracks.append({"Track Name": name, "Length": dur})
                     seen_names.add(name)
@@ -173,6 +182,7 @@ if uploaded_file:
         st.rerun()
 
     st.divider()
+    # Artist Review List
     for idx, row in df.iterrows():
         art = str(row['Artist']).strip()
         if art not in st.session_state.setlists:
@@ -181,7 +191,7 @@ if uploaded_file:
         with st.expander(f"{'✅' if not st.session_state.setlists[art].empty else '⚠️'} Artist: {art}"):
             c_u, c_b = st.columns([3, 1])
             with c_u:
-                m_url = st.text_input("Paste Link", key=f"u_{art}_{idx}")
+                m_url = st.text_input("Paste Link (Spotify/Bandcamp)", key=f"u_{art}_{idx}")
             with c_b:
                 if st.button("Scrape Link", key=f"b_{art}_{idx}"):
                     res = stage_3_playwright_scrape(m_url)
@@ -200,9 +210,10 @@ if uploaded_file:
             st.metric("Total Set Duration", sec_to_format(total_s))
 
     st.divider()
+    # Batch ZIP Generation
     if st.button("🚀 Finalize & Generate PRS ZIP", type="primary"):
         if not os.path.exists(TEMPLATE_PATH):
-            st.error(f"Template missing from GitHub!")
+            st.error(f"Template not found! Upload 'PRS SETLIST TEMPLATE.docx' to GitHub.")
         else:
             zip_buffer = BytesIO()
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_f:
@@ -234,5 +245,5 @@ if uploaded_file:
                     doc.save(doc_io)
                     zip_f.writestr(f"{d_iso}_PRS_{art.replace(' ', '_')}.docx", doc_io.getvalue())
             
-            st.success("Batch Processing Complete!")
-            st.download_button("📥 Download All PRS Forms (ZIP)", zip_buffer.getvalue(), "PRS_Forms_Export.zip")
+            st.success("All forms generated!")
+            st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "PRS_Export_Batch.zip")
