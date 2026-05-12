@@ -84,3 +84,70 @@ def get_bandcamp_selenium(artist_name):
         results = driver.find_elements(By.CSS_SELECTOR, ".result-info .heading a")
         if results:
             results[0].click()
+            time.sleep(2)
+            tracks = driver.find_elements(By.CSS_SELECTOR, ".track-title")[:10]
+            return [{"title": t.text, "duration": "4:00", "seconds": 240} for t in tracks if t.text]
+    except: pass
+    finally: driver.quit()
+    return []
+
+def get_songs_waterfall(artist_name):
+    st.write(f"🔍 Searching Spotify for **{artist_name}**...")
+    res = get_spotify_selenium(artist_name)
+    if res: return res
+    
+    st.write(f"⚠️ No Spotify match. Trying Deezer...")
+    res = get_deezer_api(artist_name)
+    if res: return res
+    
+    st.write(f"⚠️ No Deezer match. Trying Bandcamp...")
+    return get_bandcamp_selenium(artist_name)
+
+# --- 3. THE APP ---
+
+st.set_page_config(page_title="PRS Toolkit", layout="wide")
+st.title("🎸 PRS Batch Setlist Generator")
+
+uploaded_file = st.file_uploader("Upload formatted_shows.csv", type="csv")
+
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    if st.button("Generate Documents"):
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            for _, row in df.iterrows():
+                artist = row['Artist']
+                songs = get_songs_waterfall(artist)
+                
+                v_info = VENUES.get(row.get('Venue Name', 'The Social'), VENUES["The Social"])
+                total_sec = sum(s['seconds'] for s in songs)
+                
+                context = {
+                    'V_NAME': row.get('Venue Name', 'The Social'), 'V_ADDR': v_info['address'],
+                    'V_TEL': v_info['tel'], 'DATE': row['Date'], 'ARTIST': artist,
+                    'P_NAME': row.get('Promoter Name', ''), 'P_EMAIL': row.get('Promoter Email', ''),
+                    'TOTAL_DURATION': f"{total_sec // 60}m {total_sec % 60:02d}s"
+                }
+                
+                doc = DocxTemplate(TEMPLATE_PATH)
+                doc.render(context)
+                
+                # Fill song table in Word
+                if songs:
+                    table = doc.tables[-1]
+                    for i, s in enumerate(songs[:10]):
+                        table.cell(i+1, 1).text = s['title'].upper()
+                        table.cell(i+1, 4).text = s['duration']
+                
+                # Filename logic: YYYY-MM-DD_PRS_Artist.docx
+                try:
+                    d_iso = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
+                except: d_iso = str(row['Date']).replace('.', '-')
+                
+                filename = f"{d_iso}_PRS_{artist.replace(' ', '_')}.docx"
+                doc_io = BytesIO()
+                doc.save(doc_io)
+                zip_file.writestr(filename, doc_io.getvalue())
+                
+        st.success("Batch Complete!")
+        st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "PRS_Setlists.zip")
