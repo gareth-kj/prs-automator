@@ -29,9 +29,8 @@ TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), TEMPLATE_FILENAME)
 
 # --- 2. SEARCH ENGINES ---
 
-@st.cache_resource
 def get_driver():
-    """Sets up a headless Chrome driver compatible with Streamlit Cloud."""
+    """Sets up a headless Chrome driver compatible with Streamlit's Debian environment."""
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -39,30 +38,33 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     
-    # Pointing to Chromium specifically for Streamlit Cloud linux environment
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()),
-        options=options
-    )
+    # On Streamlit Cloud, chromium is installed to /usr/bin/chromium
+    # and the driver is installed to /usr/bin/chromedriver
+    try:
+        service = Service("/usr/bin/chromedriver")
+        options.binary_location = "/usr/bin/chromium"
+        return webdriver.Chrome(service=service, options=options)
+    except:
+        # Fallback for local testing
+        return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
 def get_spotify_selenium(artist_name):
     """Stage 1: Spotify Selenium - Exact Match Only."""
     driver = get_driver()
     try:
         driver.get(f"https://open.spotify.com/search/{artist_name.replace(' ', '%20')}/artists")
-        wait = WebDriverWait(driver, 10)
+        wait = WebDriverWait(driver, 12)
         
-        # Wait for artist cards to appear
+        # Wait for artist results
         artist_cards = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'a[data-testid="artist-card-container"]')))
         
         for card in artist_cards:
             found_name = card.text.split('\n')[0].strip().lower()
-            # STRICT EXACT MATCH CHECK
+            # STRICT EXACT MATCH
             if found_name == artist_name.lower():
                 card.click()
-                time.sleep(3) # Wait for artist page
+                time.sleep(3)
                 
-                # Scrape top tracks
                 track_elements = driver.find_elements(By.CSS_SELECTOR, 'div[data-testid="tracklist-row"]')[:10]
                 songs = []
                 for t in track_elements:
@@ -70,8 +72,13 @@ def get_spotify_selenium(artist_name):
                         title = t.find_element(By.CSS_SELECTOR, 'div[role="gridcell"] img').get_attribute('alt').replace("Album cover art for ", "")
                         songs.append({"title": title, "duration": "3:30", "seconds": 210})
                     except: continue
-                if songs: return songs
-    except: pass
+                if songs: 
+                    driver.quit()
+                    return songs
+    except Exception as e:
+        st.error(f"Spotify Scrape Error for {artist_name}: {str(e)}")
+    finally:
+        driver.quit()
     return []
 
 def get_deezer_api(artist_name):
@@ -96,8 +103,11 @@ def get_bandcamp_selenium(artist_name):
             results[0].click()
             time.sleep(3)
             tracks = driver.find_elements(By.CSS_SELECTOR, ".track-title")[:10]
-            return [{"title": t.text, "duration": "4:00", "seconds": 240} for t in tracks if t.text]
+            res = [{"title": t.text, "duration": "4:00", "seconds": 240} for t in tracks if t.text]
+            driver.quit()
+            return res
     except: pass
+    finally: driver.quit()
     return []
 
 def get_songs_waterfall(artist_name):
@@ -117,7 +127,6 @@ def get_songs_waterfall(artist_name):
 st.set_page_config(page_title="PRS Toolkit", layout="wide")
 st.title("🎸 PRS Batch Setlist Generator")
 
-# Check for template
 if not os.path.exists(TEMPLATE_PATH):
     st.error(f"Missing file: {TEMPLATE_FILENAME}. Please upload it to your GitHub repo.")
 
@@ -145,20 +154,17 @@ if uploaded_file:
                     'TOTAL_DURATION': f"{total_sec // 60}m {total_sec % 60:02d}s"
                 }
                 
-                # Process Word Template
                 doc = DocxTemplate(TEMPLATE_PATH)
                 doc.render(context)
                 
-                # Fill song table (assuming template has a table at the end)
                 if songs:
                     table = doc.tables[-1]
                     for i, s in enumerate(songs[:10]):
                         try:
                             table.cell(i+1, 1).text = s['title'].upper()
                             table.cell(i+1, 4).text = s['duration']
-                        except: break # In case table is shorter than 10 rows
+                        except: break
                 
-                # Filename logic
                 try:
                     d_iso = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
                 except: d_iso = "0000-00-00"
