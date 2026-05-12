@@ -73,9 +73,19 @@ def stage_3_playwright_scrape(url):
             
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(5) 
-            
+
+            # --- EXPAND LIST (SPOTIFY FIX) ---
+            try:
+                # Attempts to click "Show more" or "See more" to get past the 5-song limit
+                btn = page.get_by_role("button", name="Show more").or_(page.get_by_text("Show more"))
+                if btn.is_visible():
+                    btn.click()
+                    time.sleep(2) 
+            except:
+                pass
+
             tracks = []
-            seen_names = set() # PREVENTS DOUBLE ENTRIES
+            seen_names = set() 
             
             rows = page.query_selector_all('div[role="row"], .track_row_view, [data-testid="tracklist-row"], .tracklist-item')
             
@@ -88,7 +98,6 @@ def stage_3_playwright_scrape(url):
                     
                     name = max(clean_text, key=len).upper()
                     
-                    # De-duplication Check
                     if name in seen_names:
                         continue
                         
