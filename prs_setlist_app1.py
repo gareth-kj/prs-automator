@@ -18,7 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium_stealth import stealth
 
-# --- 1. CONFIGURATION & MATH ---
+# --- CONFIG & MATH ---
 VENUES = {
     "The Social": {"address": "5 Little Portland Street, London, W1W 7JD", "tel": "020 7636 4992", "position": "Venue Manager"},
     "The Windmill Brixton": {"address": "22 Blenheim Gardens, London, SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
@@ -37,7 +37,7 @@ def dur_to_sec(dur_str):
 def sec_to_format(total_sec):
     return f"{total_sec // 60}m {total_sec % 60:02d}s"
 
-# --- 2. THE WATERFALL FUNCTIONS ---
+# --- SEARCH ENGINES ---
 
 def get_driver():
     options = Options()
@@ -97,46 +97,41 @@ def run_waterfall(artist):
     except: pass
     finally:
         if driver: driver.quit()
-    
     return []
 
-# --- 3. APP INTERFACE ---
+# --- APP UI ---
 
-st.set_page_config(page_title="PRS Setlist Automator", layout="wide")
+st.set_page_config(page_title="PRS Automator", layout="wide")
 st.title("🎸 PRS Setlist Batch Processor")
 
 uploaded_file = st.file_uploader("Upload formatted_shows.csv", type="csv")
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
-    
     if 'setlists' not in st.session_state:
         st.session_state.setlists = {}
 
-    st.subheader("Step 1: Verify & Edit Setlists")
-
+    # AUTO-PROCESS ARTISTS
     for idx, row in df.iterrows():
         artist = str(row['Artist']).strip()
-        
-        # Initialize or Search
         if artist not in st.session_state.setlists:
-            with st.spinner(f"Searching for {artist}..."):
+            with st.spinner(f"🔍 Waterfall searching: {artist}..."):
                 results = run_waterfall(artist)
-                # Ensure we have at least one empty row if nothing found
-                if not results:
-                    st.session_state.setlists[artist] = pd.DataFrame([{"Track Name": "", "Length": "03:30"}])
-                else:
-                    st.session_state.setlists[artist] = pd.DataFrame(results)
+                st.session_state.setlists[artist] = pd.DataFrame(results) if results else pd.DataFrame(columns=["Track Name", "Length"])
 
-        # UI Expander
-        with st.expander(f"Artist: {artist}"):
+    # UI REVIEW
+    st.subheader("Step 1: Review Automated Results")
+    for idx, row in df.iterrows():
+        artist = str(row['Artist']).strip()
+        songs_df = st.session_state.setlists[artist]
+        
+        with st.expander(f"{'✅' if len(songs_df) > 0 else '⚠️'} Artist: {artist}", expanded=(len(songs_df) == 0)):
             col1, col2 = st.columns([3, 1])
             
             with col1:
-                # STAGE 4: MANUAL INPUT (Simplified to fix TypeError)
-                # We removed complex column_config to ensure compatibility
+                # Stage 4: Manual Input / Edit
                 edited_df = st.data_editor(
-                    st.session_state.setlists[artist],
+                    songs_df,
                     num_rows="dynamic",
                     key=f"editor_{artist}_{idx}",
                     use_container_width=True
@@ -148,46 +143,36 @@ if uploaded_file:
                     st.session_state.setlists[artist] = pd.DataFrame([{"Track Name": "LIVE PERFORMANCE / ORIGINAL MATERIAL", "Length": "25:00"}])
                     st.rerun()
                 
-                # Math calculation for the sidebar metric
                 total_s = sum(dur_to_sec(ln) for ln in st.session_state.setlists[artist]["Length"] if pd.notnull(ln))
-                st.metric("Total Time", sec_to_format(total_s))
+                st.metric("Total Set Time", sec_to_format(total_s))
 
-    # --- 4. BATCH GENERATION ---
+    # GENERATION
     st.divider()
     if st.button("🚀 Generate All PRS Forms", type="primary"):
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_f:
             for _, row in df.iterrows():
                 art = str(row['Artist']).strip()
-                songs_df = st.session_state.setlists.get(art)
-                
-                # Math: Calculate final sum
-                total_s = sum(dur_to_sec(ln) for ln in songs_df["Length"] if pd.notnull(ln))
+                s_df = st.session_state.setlists.get(art)
+                total_s = sum(dur_to_sec(ln) for ln in s_df["Length"] if pd.notnull(ln))
                 
                 v_info = VENUES.get(row.get('Venue Name', 'The Social'), VENUES["The Social"])
                 context = {
                     'V_NAME': row.get('Venue Name', 'The Social'),
                     'V_ADDR': row.get('Venue Address', v_info['address']),
-                    'V_TEL': v_info['tel'], 
-                    'DATE': row['Date'], 
-                    'ARTIST': art,
+                    'V_TEL': v_info['tel'], 'DATE': row['Date'], 'ARTIST': art,
                     'TOTAL_DURATION': sec_to_format(total_s)
                 }
                 
                 doc = DocxTemplate(TEMPLATE_PATH)
                 doc.render(context)
-                
-                # Fill the Word Table
                 table = doc.tables[-1]
-                for i, (_, s_row) in enumerate(songs_df.iterrows()):
+                for i, (_, s_row) in enumerate(s_df.iterrows()):
                     if i >= 10: break
-                    try:
-                        table.cell(i+1, 1).text = str(s_row["Track Name"]).upper()
-                        table.cell(i+1, 4).text = str(s_row["Length"])
-                    except: break
+                    table.cell(i+1, 1).text = str(s_row["Track Name"]).upper()
+                    table.cell(i+1, 4).text = str(s_row["Length"])
                 
-                try:
-                    d_iso = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
+                try: d_iso = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
                 except: d_iso = "0000-00-00"
                 
                 filename = f"{d_iso}_PRS_{art.replace(' ', '_')}.docx"
@@ -195,5 +180,5 @@ if uploaded_file:
                 doc.save(doc_io)
                 zip_f.writestr(filename, doc_io.getvalue())
         
-        st.success("Batch Complete!")
+        st.success("ZIP Ready!")
         st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "PRS_Setlists.zip")
