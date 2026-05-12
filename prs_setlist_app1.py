@@ -6,16 +6,28 @@ import zipfile
 import os
 import time
 from datetime import datetime
-from ytmusicapi import YTMusic
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 from io import BytesIO
 from docxtpl import DocxTemplate
 
-# Initialize YTMusic
-yt = YTMusic()
+# 1. Playwright Setup & Force Install for Streamlit Cloud
+import subprocess
+try:
+    from playwright.sync_api import sync_playwright
+    from playwright_stealth import stealth_sync
+except ImportError:
+    # This handles the initial install on the cloud server
+    subprocess.run(["playwright", "install", "chromium"])
+    from playwright.sync_api import sync_playwright
+    from playwright_stealth import stealth_sync
 
-# --- 1. CONFIG & UTILS ---
+# 2. YTMusic Setup
+try:
+    from ytmusicapi import YTMusic
+    yt = YTMusic()
+except Exception:
+    yt = None
+
+# --- CORE UTILS ---
 VENUES = {
     "The Social": {"address": "5 Little Portland Street, London, W1W 7JD", "tel": "020 7636 4992", "position": "Venue Manager"},
     "The Windmill Brixton": {"address": "22 Blenheim Gardens, London, SW2 5BZ", "tel": "020 8671 0700", "position": "Promoter"}
@@ -34,7 +46,7 @@ def dur_to_sec(dur_str):
 def sec_to_format(total_sec):
     return f"{total_sec // 60}m {total_sec % 60:02d}s"
 
-# --- 2. THE SCRAPERS ---
+# --- SCRAPERS ---
 
 def stage_1_deezer(artist):
     try:
@@ -46,6 +58,7 @@ def stage_1_deezer(artist):
     except: return None
 
 def stage_2_yt_music(artist):
+    if not yt: return None
     try:
         search = yt.search(artist, filter="artists")
         if not search: return None
@@ -56,8 +69,10 @@ def stage_2_yt_music(artist):
     except: return None
 
 def stage_3_playwright_scrape(url):
-    """Modern scraper for Spotify/Bandcamp/Soundcloud links."""
+    """Playwright rendering for direct links (Spotify/Bandcamp/Soundcloud)."""
     try:
+        # Pre-check for browser install
+        subprocess.run(["playwright", "install", "chromium"])
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -65,20 +80,20 @@ def stage_3_playwright_scrape(url):
             stealth_sync(page)
             
             page.goto(url, wait_until="networkidle", timeout=30000)
-            # Give JS a moment to render the tracklist
-            time.sleep(2)
+            time.sleep(2) # Buffer for JS
             
             tracks = []
-            # This selector covers almost all modern music players
-            rows = page.query_selector_all('div[role="row"], .track_row_view, .track-title')
+            # Looks for any row-like structure or track title CSS
+            rows = page.query_selector_all('div[role="row"], .track_row_view, .track-title, [data-testid="tracklist-row"]')
             
             for row in rows[:10]:
                 try:
-                    text = row.inner_text().split('\n')
-                    # Look for track name (longest text) and duration (colon)
-                    name = max(text, key=len).upper()
-                    dur = next((t for t in text if ":" in t and len(t) <= 5), "03:45")
-                    tracks.append({"Track Name": name, "Length": dur})
+                    text_parts = row.inner_text().split('\n')
+                    # Filter out short strings like 'E' (Explicit) or play counts
+                    clean_text = [t for t in text_parts if len(t) > 1]
+                    name = clean_text[1] if len(clean_text) > 1 else clean_text[0]
+                    dur = next((t for t in clean_text if ":" in t and len(t) <= 5), "03:30")
+                    tracks.append({"Track Name": name.upper(), "Length": dur})
                 except: continue
                 
             browser.close()
@@ -87,7 +102,7 @@ def stage_3_playwright_scrape(url):
         st.error(f"Scraper Error: {e}")
         return None
 
-# --- 3. APP UI ---
+# --- UI LOGIC ---
 st.set_page_config(page_title="PRS Waterfall Pro", layout="wide")
 st.title("🎸 PRS Batch Setlist Generator")
 
@@ -116,22 +131,21 @@ if uploaded_file:
             st.session_state.setlists[art] = pd.DataFrame(columns=["Track Name", "Length"])
         
         with st.expander(f"{'✅' if not st.session_state.setlists[art].empty else '⚠️'} Artist: {art}"):
-            # Manual URL Scrape
+            # Stage 3 Manual URL
             c_u, c_b = st.columns([3, 1])
             with c_u:
-                m_url = st.text_input("Paste Spotify/Bandcamp URL", key=f"url_{art}_{idx}")
+                m_url = st.text_input("Paste Music URL (Spotify, BC, etc.)", key=f"url_{art}_{idx}")
             with c_b:
                 if st.button("Scrape Link", key=f"btn_{art}_{idx}"):
-                    with st.spinner("Playwright is rendering page..."):
+                    with st.spinner("Playwright is scraping..."):
                         res = stage_3_playwright_scrape(m_url)
                         if res:
                             st.session_state.setlists[art] = pd.DataFrame(res)
                             st.rerun()
 
-            # The Data Editor
+            # The Data Editor (State Persistent)
             c_table, c_meta = st.columns([3, 1])
             with c_table:
-                # Key must be unique and stable to prevent text deletion
                 st.session_state.setlists[art] = st.data_editor(
                     st.session_state.setlists[art],
                     num_rows="dynamic",
@@ -140,52 +154,49 @@ if uploaded_file:
                 )
             
             with c_meta:
-                if st.button("25m Placeholder", key=f"pl_{art}_{idx}"):
-                    st.session_state.setlists[art] = pd.DataFrame([{"Track Name": "LIVE PERFORMANCE", "Length": "25:00"}])
+                if st.button("Set 25m Placeholder", key=f"pl_{art}_{idx}"):
+                    st.session_state.setlists[art] = pd.DataFrame([{"Track Name": "ORIGINAL MATERIAL", "Length": "25:00"}])
                     st.rerun()
                 
                 total_s = sum(dur_to_sec(l) for l in st.session_state.setlists[art]["Length"] if pd.notnull(l))
                 st.metric("Set Time", sec_to_format(total_s))
 
-    # --- 4. EXPORT LOGIC ---
+    # --- EXPORT ---
     st.divider()
-    if st.button("🚀 Generate All PRS Forms", type="primary"):
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_f:
-            for _, row in df.iterrows():
-                art = str(row['Artist']).strip()
-                s_df = st.session_state.setlists.get(art, pd.DataFrame())
-                total_s = sum(dur_to_sec(l) for l in s_df["Length"] if pd.notnull(l))
-                
-                v_name = row.get('Venue Name', 'The Social')
-                v_info = VENUES.get(v_name, VENUES["The Social"])
-                
-                context = {
-                    'V_NAME': v_name,
-                    'V_ADDR': v_info['address'],
-                    'V_TEL': v_info['tel'], 
-                    'DATE': row['Date'], 
-                    'ARTIST': art,
-                    'TOTAL_DURATION': sec_to_format(total_s)
-                }
-                
-                doc = DocxTemplate(TEMPLATE_PATH)
-                doc.render(context)
-                table = doc.tables[-1]
-                for i, (_, s_row) in enumerate(s_df.iterrows()):
-                    if i >= 10: break # Template usually has 10 rows
-                    table.cell(i+1, 1).text = str(s_row["Track Name"]).upper()
-                    table.cell(i+1, 4).text = str(s_row["Length"])
-                
-                try: 
-                    d_iso = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
-                except: 
-                    d_iso = "0000-00-00"
-                
-                filename = f"{d_iso}_PRS_{art.replace(' ', '_')}.docx"
-                doc_io = BytesIO()
-                doc.save(doc_io)
-                zip_f.writestr(filename, doc_io.getvalue())
-        
-        st.success("ZIP File Ready!")
-        st.download_button("📥 Download All PRS Documents", zip_buffer.getvalue(), "PRS_Setlists_Batch.zip")
+    if st.button("🚀 Generate Final PRS ZIP", type="primary"):
+        if not os.path.exists(TEMPLATE_PATH):
+            st.error("Template file missing from GitHub repository!")
+        else:
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_f:
+                for _, row in df.iterrows():
+                    art = str(row['Artist']).strip()
+                    s_df = st.session_state.setlists.get(art, pd.DataFrame())
+                    total_s = sum(dur_to_sec(l) for l in s_df["Length"] if pd.notnull(l))
+                    
+                    v_name = row.get('Venue Name', 'The Social')
+                    v_info = VENUES.get(v_name, VENUES["The Social"])
+                    
+                    context = {
+                        'V_NAME': v_name, 'V_ADDR': v_info['address'], 'V_TEL': v_info['tel'], 
+                        'DATE': row['Date'], 'ARTIST': art, 'TOTAL_DURATION': sec_to_format(total_s)
+                    }
+                    
+                    doc = DocxTemplate(TEMPLATE_PATH)
+                    doc.render(context)
+                    table = doc.tables[-1]
+                    for i, (_, s_row) in enumerate(s_df.iterrows()):
+                        if i >= 10: break
+                        table.cell(i+1, 1).text = str(s_row["Track Name"]).upper()
+                        table.cell(i+1, 4).text = str(s_row["Length"])
+                    
+                    try: d_iso = datetime.strptime(str(row['Date']).strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
+                    except: d_iso = "0000-00-00"
+                    
+                    filename = f"{d_iso}_PRS_{art.replace(' ', '_')}.docx"
+                    doc_io = BytesIO()
+                    doc.save(doc_io)
+                    zip_f.writestr(filename, doc_io.getvalue())
+            
+            st.success("Batch Complete!")
+            st.download_button("📥 Download All Documents", zip_buffer.getvalue(), "PRS_Setlists.zip")
