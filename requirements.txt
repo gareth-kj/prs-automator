@@ -1,13 +1,7 @@
 streamlit
 pandas
 requests
-zipfile36
-docxtpl
-pypdf
-selenium
-webdriver-manager
-selenium-stealth
-beautifulsoup4
 ytmusicapi
 playwright
 playwright-stealth
+docxtpl
