@@ -45,7 +45,7 @@ def stage_3_playwright_scrape(url):
             os.makedirs(PW_BROWSER_PATH)
         
         if not os.listdir(PW_BROWSER_PATH):
-            with st.spinner("Downloading browser engine (First-time setup)..."):
+            with st.spinner("Downloading browser engine..."):
                 subprocess.run(["playwright", "install", "chromium"], check=True)
 
         from playwright.sync_api import sync_playwright
@@ -61,33 +61,40 @@ def stage_3_playwright_scrape(url):
             )
             page = context.new_page()
             
-            # --- VERSION AGNOSTIC STEALTH ---
+            # Stealth Handling
             try:
-                # Try v1.x Function Syntax
                 playwright_stealth.stealth_sync(page)
             except AttributeError:
                 try:
-                    # Try v2.x Class Syntax
                     from playwright_stealth import Stealth
                     Stealth().apply(page)
                 except:
-                    pass # Proceed without stealth if both fail
+                    pass 
             
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(5) 
             
             tracks = []
+            seen_names = set() # PREVENTS DOUBLE ENTRIES
+            
             rows = page.query_selector_all('div[role="row"], .track_row_view, [data-testid="tracklist-row"], .tracklist-item')
             
-            for row in rows[:10]:
+            for row in rows:
+                if len(tracks) >= 10: break
                 try:
                     text_parts = row.inner_text().split('\n')
                     clean_text = [t.strip() for t in text_parts if len(t.strip()) > 1]
                     if not clean_text: continue
                     
                     name = max(clean_text, key=len).upper()
+                    
+                    # De-duplication Check
+                    if name in seen_names:
+                        continue
+                        
                     dur = next((t for t in clean_text if ":" in t and len(t) <= 5), "03:30")
                     tracks.append({"Track Name": name, "Length": dur})
+                    seen_names.add(name)
                 except: continue
                 
             browser.close()
@@ -107,8 +114,7 @@ uploaded_file = st.file_uploader("Upload formatted_shows.csv", type="csv")
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
-    st.info(f"Loaded {len(df)} artists.")
-
+    
     if st.button("🚀 Run Automated Search (Deezer + YT Music)"):
         p_text = st.empty()
         p_bar = st.progress(0)
@@ -149,7 +155,7 @@ if uploaded_file:
         with st.expander(f"{'✅' if not st.session_state.setlists[art].empty else '⚠️'} Artist: {art}"):
             c_u, c_b = st.columns([3, 1])
             with c_u:
-                m_url = st.text_input("Paste Link (Spotify/Bandcamp/Soundcloud)", key=f"u_{art}_{idx}")
+                m_url = st.text_input("Paste Link", key=f"u_{art}_{idx}")
             with c_b:
                 if st.button("Scrape Link", key=f"b_{art}_{idx}"):
                     res = stage_3_playwright_scrape(m_url)
